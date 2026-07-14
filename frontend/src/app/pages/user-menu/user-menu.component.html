@@ -21,9 +21,13 @@
     </mat-form-field>
     <!-- Space between button and filter -->
     <span class="header-icon"></span>
-    <button mat-mini-fab (click)="ChangePage('new-job')" color="primary" aria-label="Move to new-job page">
-      <mat-icon>add</mat-icon>
-    </button>
+    <button mat-raised-button (click)="ChangePage('new-job')" color="primary" aria-label="Submit existing application">
+  <mat-icon>upload_file</mat-icon> Submit existing application
+</button>
+<span class="header-icon"></span>
+<button mat-raised-button (click)="ChangePage('pipeline-creation')" color="accent" aria-label="New application">
+  <mat-icon>add_circle</mat-icon> New application (Pipeline Creation)
+</button>
     <!-- Space between buttons -->
     <span class="header-icon"></span>
     <!-- Delete button for table with jobs -->

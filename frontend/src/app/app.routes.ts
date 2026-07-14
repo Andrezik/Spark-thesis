@@ -6,6 +6,7 @@ import {AdminMenuComponent} from "./pages/admin-menu/admin-menu.component";
 import {NewJobComponent} from "./pages/new-job/new-job.component";
 import {EditJobComponent} from "./pages/edit-job/edit-job.component";
 import {TestFormComponent} from "./pages/test-form/test-form.component";
+import {PipelineCreationComponent} from './pages/pipeline-creation/pipeline-creation.component';
 
 export const routes: Routes = [
   {
@@ -42,5 +43,10 @@ export const routes: Routes = [
     path: 'test',
     component: TestFormComponent,
     title: 'Test'
+  },
+  {
+    path: 'pipeline-creation',
+    component: PipelineCreationComponent,
+    title: 'Pipeline Creation'
   }
 ];

@@ -35,13 +35,11 @@ services:
       - uploads_vol:/KubernetesAPI/backend/uploads
 
   kubernetes-ui:
-    image: nginx:latest
+    build: ./frontend
     container_name: ui
     restart: always
     ports:
       - "8080:80"
-    volumes:
-      - ./frontend:/usr/share/nginx/html
 
   kubernetes-executor:
     image: kubernetes-executor:v0.1

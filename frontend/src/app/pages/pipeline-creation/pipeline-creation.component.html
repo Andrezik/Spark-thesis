@@ -1,0 +1,88 @@
+<mat-toolbar color="primary">
+  <span>Kubernetes API</span>
+  <span class="header-spacer"></span>
+  <mat-icon matTooltip="User" color="warn">person</mat-icon>
+  <span class="header-icon">{{user}}</span>
+  <button mat-mini-fab matTooltip="Logout" (click)="logout()" color="white" aria-label="Logout">
+    <mat-icon color="primary">logout</mat-icon>
+  </button>
+</mat-toolbar>
+
+<br>
+<button mat-mini-fab (click)="goBack()" color="primary">
+  <mat-icon>chevron_left</mat-icon>
+</button>
+<br><br>
+
+<mat-card>
+  <mat-card-content>
+    <h2>Pipeline Creation</h2>
+    <form [formGroup]="pipelineForm">
+
+      <mat-form-field>
+        <mat-label>Pipeline Name</mat-label>
+        <input matInput formControlName="name">
+      </mat-form-field>
+      <br>
+
+      <mat-form-field>
+        <mat-label>Algorithm</mat-label>
+        <mat-select formControlName="algorithm">
+          <mat-option value="org.apache.spark.examples.SparkPi">SparkPi</mat-option>
+          <mat-option value="org.apache.spark.examples.SparkKMeans">K-Means</mat-option>
+          <mat-option value="org.apache.spark.examples.SparkLR">Logistic Regression</mat-option>
+        </mat-select>
+      </mat-form-field>
+      <br>
+
+      <div class="file-upload">
+        <label>Data File (JSON)</label>
+        <br>
+        <input type="file" accept=".json" (change)="onFileSelected($event)">
+        <span>{{fileName || 'No file selected'}}</span>
+      </div>
+      <br>
+
+      <mat-form-field>
+        <mat-label>Executor Instances</mat-label>
+        <input matInput type="number" formControlName="instances">
+      </mat-form-field>
+      <br>
+
+      <mat-form-field>
+        <mat-label>Executor Cores</mat-label>
+        <input matInput type="number" formControlName="cores">
+      </mat-form-field>
+      <br>
+
+      <mat-form-field>
+        <mat-label>Executor Memory (MB)</mat-label>
+        <input matInput type="number" formControlName="memory">
+      </mat-form-field>
+      <br>
+
+      <mat-form-field>
+        <mat-label>Container Image</mat-label>
+        <input matInput formControlName="image">
+      </mat-form-field>
+      <br>
+
+      <div *ngIf="pipelineCreated" style="color: green; margin: 10px 0;">
+      Pipeline created successfully! 
+      <br>
+      <a mat-raised-button color="primary" href="/#/user-menu">Go to Dashboard</a>
+      </div>
+      <div *ngIf="pipelineError" style="color: red; margin: 10px 0;">
+       Error creating pipeline.
+      </div>
+      <div *ngIf="noFileError" style="color: orange; margin: 10px 0;">
+      Please select a JSON data file.
+      </div>
+
+      <button mat-fab color="primary" (click)="submitPipeline()">
+        <mat-icon>check</mat-icon>
+      </button>
+
+    </form>
+  </mat-card-content>
+</mat-card>

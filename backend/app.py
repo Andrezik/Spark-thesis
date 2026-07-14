@@ -16,7 +16,7 @@ import uuid
 
 # Global Variables
 proxmox = os.environ['PROXMOX']  # Dockerfile Configuration
-ALLOWED_EXTENSIONS = {'jar', 'py'}   # txt must be removed
+ALLOWED_EXTENSIONS = {'jar', 'py', 'json'}   # txt must be removed
 # Instance of flask application
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = './backend/uploads/'  # Dockerfile Configuration
@@ -159,15 +159,15 @@ def user_authentication():
             if username == '' or password == '':
                 return json.dumps({'status': 'error', 'message': 'Invalid request: missing data'}), 401
             else:
-                url = f"{proxmox}/access/ticket?username={username}&password={password}"
-                response = requests.request("POST", url, headers={}, data={}, verify=False)
+                url = f"{proxmox}/api2/json/access/ticket"
+                response = requests.post(url, data={"username": username, "password": password}, verify=False)
                 auth_res = json.loads(response.text)
                 # Permissions request
                 # headers = request.headers
                 ticket = auth_res['data']['ticket']
                 cookie = ('PVEAuthCookie=' + ticket)
                 # request.headers.get('Ticket'))
-                permission_url = f"{proxmox}/access/permissions"
+                permission_url = f"{proxmox}/api2/json/access/permissions"
                 permission_res = requests.request("GET", permission_url, headers={'Cookie': cookie}, data={}, verify=False)
                 if '/vms/299' in json.loads(permission_res.text)['data']:
                     permissions = json.loads(permission_res.text)['data']['/vms/299']
