@@ -156,7 +156,23 @@
 
       <mat-divider></mat-divider>
 
-      <!-- =========================== RESOURCES =========================== -->
+      <!-- =========================== EXECUTION =========================== -->
+      <h3>Execution</h3>
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Execution target</mat-label>
+        <mat-select formControlName="target">
+          <mat-option *ngFor="let target of targets" [value]="target.value">
+            {{target.label}}
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <p class="hint" *ngIf="isLocalTarget">
+        The program runs with Spark inside the executor container, without a cluster.
+        A sample dataset is available at <code>/data/customers.csv</code>
+        (columns: age, income, tenure, churned).
+      </p>
+
       <h3>Cluster resources</h3>
       <div class="params-row">
         <mat-form-field appearance="outline">

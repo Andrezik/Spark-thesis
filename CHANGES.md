@@ -1096,3 +1096,346 @@ executor είναι `/KubernetesAPI/executor` και η επίλυση οδηγ�
 Σημειώνεται ότι, με το cluster μη προσβάσιμο, η εκτέλεση θα εξακολουθεί να αποτυγχάνει
 στο στάδιο σύνδεσης με το Kubernetes API — οι παρούσες διορθώσεις αίρουν τα εμπόδια που
 προηγούνται αυτού του σταδίου.
+
+---
+
+## [013] 2026-08-02 — Σημείο επαναφοράς (checkpoint) στο git
+
+**Τύπος:** Διαχείριση εκδόσεων (καμία αλλαγή κώδικα)
+
+Πριν από την προσθήκη της επιλογής τοπικής εκτέλεσης, η κατάσταση του έργου
+καταγράφηκε στο git ώστε να είναι δυνατή η επαναφορά.
+
+- Commit: `802128e` — *Pipeline generation from JSON spec, option-schema fixes,
+  executor rebuild*
+- Ετικέτα: **`checkpoint-before-local-execution`**
+- Επαναφορά με: `git checkout checkpoint-before-local-execution`
+
+Παράλληλα επεκτάθηκε το `.gitignore` με `__pycache__/`, `*.pyc` και `/gen.py`
+(προσωρινό αρχείο που δημιουργήθηκε κατά τη δοκιμή της εγγραφής [011]).
+
+---
+
+## [014] 2026-08-02 — Επιλογή τοπικής εκτέλεσης
+
+**Τύπος:** Νέα λειτουργία (προσθετική)
+**Αρχεία:** `executor/sample_customers.csv` (νέο), `executor/Dockerfile`,
+`backend/app.py`, `frontend/.../pipeline-creation.component.ts` και `.html`
+
+### Αιτία
+
+Το Kubernetes cluster δεν είναι προσβάσιμο εκτός του δικτύου του ιδρύματος (εγγραφή
+[011]), επομένως η λειτουργία του συστήματος δεν μπορεί να επιδειχθεί από άκρο σε άκρο.
+Το `spark-submit` όμως δεν απαιτεί Kubernetes: με `--master local[*]` εκτελεί το
+πρόγραμμα τοπικά, και το container του executor διαθέτει ήδη Spark 3.5.0 και python3.
+
+Η προσθήκη είναι **αυστηρά προσθετική**: η προεπιλογή παραμένει η υποβολή στο cluster
+και η υπάρχουσα συμπεριφορά δεν μεταβάλλεται. Η αφαίρεσή της συνίσταται στη διαγραφή
+ενός πεδίου της φόρμας και ενός κλάδου `if` στο backend.
+
+### Αλλαγή 14.1 — `executor/sample_customers.csv` (νέο αρχείο)
+
+Δοκιμαστικό σύνολο δεδομένων 16 εγγραφών με στήλες `age`, `income`, `tenure`, `churned`.
+Οι δύο πρώτες χρησιμεύουν ως χαρακτηριστικά για μη επιβλεπόμενους αλγορίθμους, η
+τελευταία ως ετικέτα για επιβλεπόμενους. Έτσι μπορούν να επιδειχθούν και οι δύο
+κατηγορίες χωρίς εξωτερική πηγή δεδομένων.
+
+### Αλλαγή 14.2 — `executor/Dockerfile`
+
+Προστέθηκε μετά την εγκατάσταση των εξαρτήσεων:
+
+```dockerfile
+# Sample dataset, so a pipeline can be run and demonstrated without needing
+# any external storage. Referenced from the UI as /data/customers.csv
+RUN mkdir -p /data && cp sample_customers.csv /data/customers.csv
+```
+
+Η αντιγραφή σε `/data/customers.csv` δίνει σύντομη και ευανάγνωστη διαδρομή για χρήση
+στη φόρμα, αντί της `/KubernetesAPI/executor/sample_customers.csv` όπου το τοποθετεί η
+εντολή `COPY`.
+
+### Αλλαγή 14.3 — `backend/app.py`: παράμετρος `target`
+
+**Πριν:**
+
+```python
+def build_job_options(pipeline_name, program_path, resources):
+    resources = resources or {}
+    return {
+        'spark_path': resources.get('sparkPath', '/opt/spark/bin/spark-submit'),
+        'master': resources.get('master', 'k8s://https://kubernetes.default.svc'),
+        'deploy-mode': resources.get('deployMode', 'cluster'),
+        ...
+```
+
+**Μετά:**
+
+```python
+def build_job_options(pipeline_name, program_path, resources):
+    resources = resources or {}
+    target = str(resources.get('target', 'kubernetes')).lower()
+
+    if target == 'local':
+        default_master = 'local[*]'
+        default_deploy_mode = 'client'
+    else:
+        default_master = 'k8s://https://kubernetes.default.svc'
+        default_deploy_mode = 'cluster'
+
+    return {
+        'spark_path': resources.get('sparkPath', '/opt/spark/bin/spark-submit'),
+        'master': resources.get('master', default_master),
+        'deploy-mode': resources.get('deployMode', default_deploy_mode),
+        ...
+```
+
+Η απουσία της παραμέτρου `target` ισοδυναμεί με `'kubernetes'`, ώστε αιτήματα παλαιότερης
+μορφής να συμπεριφέρονται ακριβώς όπως πριν.
+
+### Αλλαγή 14.4 — Frontend
+
+Στο `pipeline-creation.component.ts` προστέθηκαν ο πίνακας `targets` με τις δύο επιλογές,
+το πεδίο `target` στη φόρμα με προεπιλογή `'kubernetes'`, η μεταβίβασή του στο
+`buildResources()`, και ο βοηθός `isLocalTarget`.
+
+Στο `pipeline-creation.component.html` προστέθηκε ενότητα *Execution* με το αντίστοιχο
+πεδίο επιλογής, καθώς και υπόδειξη που εμφανίζεται μόνο σε τοπική εκτέλεση και
+υποδεικνύει τη διαδρομή του δοκιμαστικού συνόλου δεδομένων.
+
+### Έλεγχος
+
+**Backend.** Με προσομοιωμένη βάση, τρία αιτήματα προς `POST /pipeline`:
+
+| `target` | `master` που αποθηκεύτηκε | `deploy-mode` |
+|----------|---------------------------|---------------|
+| `kubernetes` | `k8s://https://kubernetes.default.svc` | `cluster` |
+| `local` | `local[*]` | `client` |
+| *(απουσιάζει)* | `k8s://https://kubernetes.default.svc` | `cluster` |
+
+Επιβεβαιώθηκε επίσης ότι η αποθηκευμένη διαδρομή του εκτελέσιμου είναι απόλυτη
+(Αλλαγή 12.3).
+
+**Συμβατότητα με την επικύρωση.** Οι επιλογές τοπικής εκτέλεσης ελέγχθηκαν έναντι του
+πραγματικού σχήματος μέσω του `SparkCommandGenerator`: καμία παραβίαση, και η παραγόμενη
+εντολή είναι
+
+```
+/opt/spark/bin/spark-submit \
+  --master local[*] \
+  --deploy-mode client \
+  --name local-demo \
+  --conf spark.executor.instances=1 \
+  ...
+  /KubernetesAPI/backend/uploads/zikou@pve/abc-local-demo.py
+```
+
+Οι ρυθμίσεις `spark.kubernetes.*` παραμένουν στην εντολή αλλά αγνοούνται από το Spark
+όταν ο master είναι τοπικός.
+
+**Frontend.** `ngc -p tsconfig.app.json --noEmit` → 0 σφάλματα (28 δευτερόλεπτα), με
+`strictTemplates` ενεργό.
+
+### Κατάσταση
+
+Γραμμένο και ελεγμένο στατικά. Εκκρεμεί rebuild και ζωντανή επίδειξη.
+
+---
+
+## [015] 2026-08-02 — Διόρθωση της έκδοσης `numpy` της Αλλαγής 12.1
+
+**Τύπος:** Τροποποίηση υπάρχοντος αρχείου
+**Αρχείο:** `executor/requirements2.txt`
+
+### Αιτία
+
+Το build του executor απέτυχε:
+
+```
+ERROR: No matching distribution found for numpy==1.26.4 (from -r requirements2.txt (line 18))
+(from versions: 1.3.0, ..., 1.24.2, 1.24.3, 1.24.4)
+```
+
+Η λίστα των διαθέσιμων εκδόσεων που παραθέτει το pip τερματίζει στην `1.24.4`. Αυτό
+αποκαλύπτει ότι ο διερμηνέας Python της εικόνας `apache/spark:3.5.0` είναι η έκδοση
+**3.8**: το numpy 1.25 και νεότερα απαιτούν Python 3.9 ή νεότερη, οπότε το pip δεν τα
+θεωρεί υποψήφια. Η επιλογή της `1.26.4` στην Αλλαγή 12.1 έγινε με την εσφαλμένη
+παραδοχή ότι η εικόνα βασίζεται σε Ubuntu 22.04 με Python 3.10.
+
+### Αλλαγή
+
+**Πριν:** `numpy==1.26.4`
+**Μετά:** `numpy==1.24.4`
+
+Η `1.24.4` είναι η τελευταία έκδοση που υποστηρίζει Python 3.8 και ταυτόχρονα προηγείται
+της σειράς 2.x, διατηρώντας έτσι τη συμβατότητα με το PySpark 3.5.0 που ήταν ο αρχικός
+λόγος καρφιτσώματος συγκεκριμένης έκδοσης.
+
+### Παρατήρηση
+
+Το σφάλμα αυτό δείχνει τη χρησιμότητα του καρφιτσώματος εκδόσεων: η αστοχία εμφανίστηκε
+κατά το build, με σαφές μήνυμα, αντί να εγκατασταθεί σιωπηλά μια τυχαία έκδοση και να
+προκύψει δυσδιάγνωστη αποτυχία κατά την εκτέλεση.
+
+### Κατάσταση
+
+Διορθωμένο. Εκκρεμεί επανάληψη του build.
+
+---
+
+## [016] 2026-08-02 — Μονάδα μέτρησης στις ρυθμίσεις μνήμης
+
+**Τύπος:** Τροποποίηση υπάρχοντος αρχείου
+**Αρχείο:** `executor/SparkCommandGenerator.py`
+
+### Αιτία
+
+Με το build διορθωμένο και την τοπική εκτέλεση ενεργή, το `spark-submit` εκτελέστηκε και
+το Spark έφτασε μέχρι τη δημιουργία του `SparkContext`, όπου απέτυχε:
+
+```
+org.apache.spark.SparkIllegalArgumentException: [INVALID_EXECUTOR_MEMORY]
+Executor memory 512 must be at least 471859200.
+```
+
+Το σχήμα επιλογών (`database/Kubernetes.Options.json`) ορίζει την
+`spark.executor.memory` ως ακέραιο με εύρος `512` έως `10240`, δηλαδή σε **megabytes**.
+Η μονάδα όμως υπονοείται και δεν καταγράφεται πουθενά στην τιμή. Το Spark, όταν λαμβάνει
+αριθμό χωρίς επίθεμα μονάδας, τον ερμηνεύει ως **bytes**. Έτσι το `512` γινόταν 512 bytes
+αντί για 512 MiB, τιμή κατά πολύ μικρότερη του ελάχιστου επιτρεπτού.
+
+Πρόκειται για προϋπάρχον σφάλμα: αφορά κάθε job, ανεξάρτητα από τον τρόπο εκτέλεσης, και
+θα εμφανιζόταν εξίσου κατά την υποβολή σε cluster.
+
+### Αλλαγή
+
+Προστέθηκε σταθερά με τα κλειδιά που εκφράζουν μέγεθος μνήμης:
+
+```python
+_MEMORY_KEYS = {'spark.executor.memory', 'spark.driver.memory'}
+```
+
+και βοηθητική συνάρτηση που προσθέτει τη μονάδα:
+
+```python
+def _conf_value(key, value):
+    """ Renders a conf value, appending the megabyte unit to bare memory numbers. """
+    if key in _MEMORY_KEYS and str(value).strip().isdigit():
+        return f'{int(value)}m'
+    return value
+```
+
+**Πριν:**
+
+```python
+    for conf_key, conf_value in (options.get('conf') or {}).items():
+        args += ['--conf', f'{conf_key}={conf_value}']
+```
+
+**Μετά:**
+
+```python
+    for conf_key, conf_value in (options.get('conf') or {}).items():
+        args += ['--conf', f'{conf_key}={_conf_value(conf_key, conf_value)}']
+```
+
+### Σχεδιαστική επιλογή
+
+Η μετατροπή τοποθετήθηκε στον generator και όχι στη βάση, ώστε το σχήμα να παραμείνει ως
+έχει (ακέραιος με ελέγξιμο αριθμητικό εύρος — κάτι που θα χανόταν αν η τιμή γινόταν
+συμβολοσειρά τύπου `'512m'`). Ο έλεγχος `isdigit()` αφήνει ανέπαφες τιμές που φέρουν ήδη
+μονάδα, ώστε μια μελλοντική τιμή `'2g'` να περάσει αυτούσια.
+
+### Έλεγχος
+
+| Είσοδος | Παραγόμενο όρισμα |
+|---------|-------------------|
+| `spark.executor.memory: 512` | `--conf spark.executor.memory=512m` |
+| `spark.executor.memory: '2g'` | `--conf spark.executor.memory=2g` |
+
+Η επικύρωση έναντι του πραγματικού σχήματος εξακολουθεί να περνά χωρίς σφάλματα.
+
+### Συναφές εύρημα (δεν διορθώθηκε)
+
+Το job της αποτυχημένης εκτέλεσης καταγράφηκε στη βάση με `status: 'finished'` και
+`priority: 0`, παρότι το πρόγραμμα τερμάτισε με σφάλμα. Η αιτία βρίσκεται στο
+`executor/JobExecutor.py`:
+
+```python
+result = subprocess.run(spark_submit_args, shell=False, capture_output=True, text=True)
+print(result.stderr)
+if result.stdout == '':
+    result.stdout = "Subprocess didn't run"
+```
+
+Η επιτυχία κρίνεται από το αν η τυπική έξοδος είναι κενή, αντί από τον κωδικό εξόδου της
+διεργασίας (`result.returncode`). Επειδή η ιχνηλάτηση σφάλματος της Python γράφτηκε στην
+τυπική έξοδο, η έξοδος δεν ήταν κενή και το job θεωρήθηκε επιτυχημένο. Καταγράφεται ως
+εκκρεμότητα προς απόφαση.
+
+---
+
+## [017] 2026-08-02 — Επιτυχής εκτέλεση από άκρο σε άκρο
+
+**Τύπος:** Έλεγχος λειτουργίας (καμία αλλαγή κώδικα)
+
+### Σενάριο
+
+Μέσω της φόρμας του UI, χωρίς καμία χειροκίνητη παρέμβαση:
+
+| Πεδίο | Τιμή |
+|-------|------|
+| Pipeline Name | `customer-segments` |
+| Data Path | `/data/customers.csv` |
+| Format | `csv`, με header και συμπερασμό τύπων |
+| Algorithm | K-Means |
+| Feature Columns | `age, income` |
+| k | 2 |
+| Execution target | Local |
+
+### Αποτέλεσμα
+
+```
++---+------+------+-------+---------------+----------+
+|age|income|tenure|churned|features       |prediction|
++---+------+------+-------+---------------+----------+
+|25 |30000 |1     |1      |[25.0,30000.0] |1         |
+|34 |52000 |4     |0      |[34.0,52000.0] |1         |
+|45 |61000 |9     |0      |[45.0,61000.0] |1         |
+|23 |28000 |1     |1      |[23.0,28000.0] |1         |
+|52 |90000 |15    |0      |[52.0,90000.0] |0         |
+|38 |58000 |6     |0      |[38.0,58000.0] |1         |
+|29 |41000 |2     |1      |[29.0,41000.0] |1         |
+|41 |72000 |11    |0      |[41.0,72000.0] |0         |
+|27 |33000 |1     |1      |[27.0,33000.0] |1         |
+|48 |84000 |13    |0      |[48.0,84000.0] |0         |
+|31 |45000 |3     |1      |[31.0,45000.0] |1         |
+|57 |95000 |20    |0      |[57.0,95000.0] |0         |
+|22 |26000 |1     |1      |[22.0,26000.0] |1         |
+|44 |69000 |10    |0      |[44.0,69000.0] |0         |
+|36 |55000 |5     |0      |[36.0,55000.0] |1         |
+|60 |102000|25    |0      |[60.0,102000.0]|0         |
++---+------+------+-------+---------------+----------+
+```
+
+### Σχολιασμός
+
+Η στήλη `features` είναι το διάνυσμα χαρακτηριστικών που συνέθεσε ο `VectorAssembler`, και
+η `prediction` η ομάδα που ανέθεσε ο K-Means. Ο διαχωρισμός έγινε κυρίως βάσει
+εισοδήματος: η ομάδα 0 περιλαμβάνει τους πελάτες με εισόδημα 69.000 και άνω, η ομάδα 1
+τους υπόλοιπους. Αξιοσημείωτο είναι ότι όλοι οι πελάτες της ομάδας 0 έχουν `churned = 0`,
+δηλαδή ο μη επιβλεπόμενος αλγόριθμος εντόπισε ομαδοποίηση που συσχετίζεται με την
+αποχώρηση, χωρίς να έχει πρόσβαση στη σχετική στήλη.
+
+### Επαληθευμένη αλυσίδα
+
+1. Ο χρήστης συμπληρώνει φόρμα στο Angular frontend.
+2. Το frontend κατασκευάζει την προδιαγραφή JSON.
+3. Το backend την επικυρώνει και παράγει πρόγραμμα PySpark.
+4. Το πρόγραμμα αποθηκεύεται σε κοινόχρηστο τόμο και καταχωρείται job στη MongoDB.
+5. Ο executor εντοπίζει το job, επικυρώνει τις επιλογές του έναντι του σχήματος στη βάση,
+   κατασκευάζει την εντολή `spark-submit` ως λίστα ορισμάτων και την εκτελεί.
+6. Το Spark εκτελεί το πρόγραμμα και τα αποτελέσματα καταγράφονται στη MongoDB.
+
+Το μόνο στάδιο που δεν έχει επαληθευτεί είναι η δρομολόγηση σε Kubernetes cluster, η
+οποία διαφέρει αποκλειστικά ως προς την τιμή της επιλογής `master` και απαιτεί πρόσβαση
+στο δίκτυο του ιδρύματος (εγγραφή [011]).

@@ -23,6 +23,12 @@ _SPECIAL_KEYS = {'spark_path', 'conf', 'additional_options', 'executable'}
 # flag present in the options dict but not listed here is still emitted,
 # just after these.
 _PREFERRED_FLAG_ORDER = ['master', 'deploy-mode', 'name', 'class']
+# Confs whose value is a memory size. The option schema stores them as a plain
+# integer number of megabytes, but Spark reads a bare number as BYTES, so an
+# unsuffixed 512 is rejected with "Executor memory 512 must be at least
+# 471859200". The unit is appended when the stored value is a bare number;
+# values that already carry a unit (e.g. '2g') are passed through untouched.
+_MEMORY_KEYS = {'spark.executor.memory', 'spark.driver.memory'}
 
 
 class SparkCommandValidationError(Exception):
@@ -119,6 +125,13 @@ def validate_options(options):
 
 ''' GENERATION '''
 
+def _conf_value(key, value):
+    """ Renders a conf value, appending the megabyte unit to bare memory numbers. """
+    if key in _MEMORY_KEYS and str(value).strip().isdigit():
+        return f'{int(value)}m'
+    return value
+
+
 def _executable_arg(executable):
     # Historical convention in this codebase: a local path like "./job.jar"
     # becomes "local:///job.jar" for spark-submit running in k8s.
@@ -158,7 +171,7 @@ def generate_spark_submit_args(options, skip_validation=False):
 
     # --conf key=value pairs
     for conf_key, conf_value in (options.get('conf') or {}).items():
-        args += ['--conf', f'{conf_key}={conf_value}']
+        args += ['--conf', f'{conf_key}={_conf_value(conf_key, conf_value)}']
 
     # User-added --conf key=value pairs (not part of the fixed schema)
     for entry in (options.get('additional_options') or {}).values():

@@ -293,12 +293,27 @@ def save_generated_program(user, pipeline_name, source_code):
 
 
 # Helper: turns the resources part of a pipeline request into the job options dict
+#
+# 'target' selects where the generated program runs:
+#   'kubernetes' (default) - submitted to the cluster, the original behaviour
+#   'local'                - executed by Spark inside the executor container,
+#                            which needs no cluster and is used for demonstrating
+#                            the full chain end to end
 def build_job_options(pipeline_name, program_path, resources):
     resources = resources or {}
+    target = str(resources.get('target', 'kubernetes')).lower()
+
+    if target == 'local':
+        default_master = 'local[*]'
+        default_deploy_mode = 'client'
+    else:
+        default_master = 'k8s://https://kubernetes.default.svc'
+        default_deploy_mode = 'cluster'
+
     return {
         'spark_path': resources.get('sparkPath', '/opt/spark/bin/spark-submit'),
-        'master': resources.get('master', 'k8s://https://kubernetes.default.svc'),
-        'deploy-mode': resources.get('deployMode', 'cluster'),
+        'master': resources.get('master', default_master),
+        'deploy-mode': resources.get('deployMode', default_deploy_mode),
         'name': pipeline_name,
         # PySpark programs are submitted without --class; the key is kept (and left
         # empty) because the option schema marks it as required.

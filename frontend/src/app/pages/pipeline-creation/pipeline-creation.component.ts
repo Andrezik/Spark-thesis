@@ -104,6 +104,13 @@ export class PipelineCreationComponent implements OnInit {
   algorithms = ALGORITHMS;
   formats = ['csv', 'json', 'parquet', 'orc', 'text'];
   writeModes = ['overwrite', 'append', 'ignore', 'error'];
+  // Where the generated program is executed. 'kubernetes' is the original
+  // behaviour; 'local' runs it with Spark inside the executor container and
+  // needs no cluster.
+  targets = [
+    { value: 'kubernetes', label: 'Kubernetes cluster' },
+    { value: 'local', label: 'Local (inside the executor)' }
+  ];
   stepTypes = [
     { value: 'select', label: 'Select columns' },
     { value: 'filter', label: 'Filter rows' },
@@ -146,7 +153,8 @@ export class PipelineCreationComponent implements OnInit {
       outputFormat: ['parquet'],
       outputMode: ['overwrite'],
 
-      // --- cluster resources ---
+      // --- execution target and cluster resources ---
+      target: ['kubernetes', Validators.required],
       instances: [1, Validators.required],
       cores: [1, Validators.required],
       memory: [512, Validators.required],
@@ -294,11 +302,16 @@ export class PipelineCreationComponent implements OnInit {
   private buildResources(): any {
     const form = this.pipelineForm.value;
     return {
+      target: form.target,
       instances: Number(form.instances),
       cores: Number(form.cores),
       memory: Number(form.memory),
       image: form.image
     };
+  }
+
+  get isLocalTarget(): boolean {
+    return this.pipelineForm?.get('target')?.value === 'local';
   }
 
   private authHeaders(): HttpHeaders {

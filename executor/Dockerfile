@@ -40,6 +40,10 @@ RUN KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" && \
 COPY ./* .
 RUN python3 -m pip install --no-cache-dir -r requirements2.txt
 
+# Sample dataset, so a pipeline can be run and demonstrated without needing
+# any external storage. Referenced from the UI as /data/customers.csv
+RUN mkdir -p /data && cp sample_customers.csv /data/customers.csv
+
 # Write the cluster configuration where kubectl actually looks for it (~/.kube/config)
 RUN mkdir -p /root/.kube && bash ./kubectl_config.sh && kubectl config get-contexts
 
