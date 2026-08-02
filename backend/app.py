@@ -5,6 +5,7 @@ from flask import Flask, request, url_for  # Flask
 # from flask import redirect, url_for, render_template, make_response
 import DatabaseConnection as dc     # Python file managing database
 import ManageOptions as mo  # Python file checking jobs
+import SparkProgramGenerator as spg  # Python file generating PySpark programs from a JSON spec
 import json     # JSON files
 import datetime     # Datetime
 from functools import wraps     # Wrapper
@@ -275,6 +276,112 @@ def change_priority(job_id):
     else:
         return json.dumps({'status': 'error', 'message': 'Invalid request method'}), 400
 
+# Helper: writes a generated program to the user's upload folder and returns its path
+def save_generated_program(user, pipeline_name, source_code):
+    user_folder = os.path.join(app.config['UPLOAD_FOLDER'], user + '/')
+    if not os.path.exists(user_folder):
+        os.makedirs(user_folder)
+    safe_name = secure_filename(pipeline_name) or 'pipeline'
+    filename = secure_filename(f'{uuid.uuid4()}-{safe_name}.py')
+    # Absolute path: UPLOAD_FOLDER is relative ('./backend/uploads/') and would
+    # only resolve correctly from the API container's working directory. The
+    # executor runs from a different directory, so it needs the full path.
+    file_path = os.path.abspath(os.path.join(user_folder, filename))
+    with open(file_path, 'w', encoding='utf-8') as generated_file:
+        generated_file.write(source_code)
+    return file_path, filename
+
+
+# Helper: turns the resources part of a pipeline request into the job options dict
+def build_job_options(pipeline_name, program_path, resources):
+    resources = resources or {}
+    return {
+        'spark_path': resources.get('sparkPath', '/opt/spark/bin/spark-submit'),
+        'master': resources.get('master', 'k8s://https://kubernetes.default.svc'),
+        'deploy-mode': resources.get('deployMode', 'cluster'),
+        'name': pipeline_name,
+        # PySpark programs are submitted without --class; the key is kept (and left
+        # empty) because the option schema marks it as required.
+        'class': '',
+        'conf': {
+            'spark.executor.instances': int(resources.get('instances', 1)),
+            'spark.executor.cores': int(resources.get('cores', 1)),
+            'spark.executor.memory': int(resources.get('memory', 512)),
+            'spark.kubernetes.container.image': resources.get('image', 'apache/spark:3.5.0'),
+            'spark.kubernetes.driver.node.selector.kubernetes.io/hostname': resources.get('hostname', 'k8s-1'),
+            'spark.kubernetes.authenticate.driver.serviceAccountName': resources.get('serviceAccount', 'spark')
+        },
+        'additional_options': resources.get('additionalOptions', {}),
+        'executable': program_path
+    }
+
+
+# Route for previewing the program a specification would generate (nothing is stored)
+@app.route('/preview_program', methods=['POST'])
+@authentication_required
+def preview_program():
+    if not request.is_json:
+        return json.dumps({'status': 'error', 'message': 'Invalid request body'}), 400
+
+    spec = (request.json or {}).get('spec')
+    errors = spg.validate_spec(spec)
+    if errors:
+        return json.dumps({'status': 'error', 'message': 'Invalid pipeline specification', 'errors': errors}), 400
+
+    source_code = spg.generate_program(spec, skip_validation=True)
+    return json.dumps({'status': 'success', 'program': source_code}), 200
+
+
+# Route for creating a pipeline: JSON specification -> generated PySpark program -> job
+@app.route('/pipeline', methods=['POST'])
+@authentication_required
+def pipeline():
+    if not request.is_json:
+        return json.dumps({'status': 'error', 'message': 'Invalid request body'}), 400
+
+    payload = request.json or {}
+    username = payload.get('username')
+    spec = payload.get('spec')
+
+    if not username:
+        return json.dumps({'status': 'error', 'message': 'No user found'}), 400
+
+    # 1. Validate the specification before anything is written to disk or to the database
+    errors = spg.validate_spec(spec)
+    if errors:
+        return json.dumps({'status': 'error', 'message': 'Invalid pipeline specification', 'errors': errors}), 400
+
+    # 2. Generate the PySpark program from the specification
+    source_code = spg.generate_program(spec, skip_validation=True)
+    pipeline_name = spec.get('name') or 'pipeline'
+
+    # 3. Store the generated program so the executor can submit it
+    try:
+        program_path, filename = save_generated_program(username, pipeline_name, source_code)
+    except OSError as error:
+        return json.dumps({'status': 'error', 'message': f'Could not store generated program: {error}'}), 500
+
+    # 4. Register the job, exactly like an uploaded executable would be
+    timestamp = datetime.datetime.now().strftime("%d/%m/%Y, %H:%M:%S")
+    options = build_job_options(pipeline_name, program_path, payload.get('resources'))
+    report = dc.create_job(username, 'pending', 1, timestamp, options)
+
+    return json.dumps({
+        'status': 'success',
+        'message': report['message'],
+        'filename': filename,
+        'file_path': program_path,
+        'program': source_code
+    }), 200
+
+
 ''' MAIN '''
+# Make sure the option definitions exist before serving requests. Without them
+# every check against the option schema passes vacuously (see seed_options).
+try:
+    dc.seed_options()
+except Exception as seed_error:
+    print(f'\nWARNING: could not seed option definitions: {seed_error}\n')
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0')

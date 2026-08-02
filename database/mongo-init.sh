@@ -1,6 +1,6 @@
 set -e
 
-mongosh <<EOF
+mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin <<EOF
 // Read options for initialization
 const db_options = [{
   "name": "deploy-mode",
@@ -179,6 +179,6 @@ const db_options = [{
 db = db.getSiblingDB('$MONGO_INITDB_DATABASE');
 
 // Create a new collection and insert documents
-db.οptions.insertMany(db_options);
+db.options.insertMany(db_options);
 db.createCollection('Jobs', {"name": "test"});
 EOF

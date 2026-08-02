@@ -9,79 +9,215 @@
 </mat-toolbar>
 
 <br>
-<button mat-mini-fab (click)="goBack()" color="primary">
+<button mat-mini-fab (click)="goBack()" color="primary" matTooltip="Back to dashboard">
   <mat-icon>chevron_left</mat-icon>
 </button>
 <br><br>
 
-<mat-card>
+<mat-card class="pipeline-card">
   <mat-card-content>
     <h2>Pipeline Creation</h2>
+    <p class="subtitle">
+      Describe the pipeline below. The backend turns this description into a PySpark
+      program and submits it &mdash; no executable needs to be uploaded.
+    </p>
+
     <form [formGroup]="pipelineForm">
 
-      <mat-form-field>
+      <!-- ============================ GENERAL ============================ -->
+      <h3>General</h3>
+      <mat-form-field appearance="outline" class="full-width">
         <mat-label>Pipeline Name</mat-label>
-        <input matInput formControlName="name">
+        <input matInput formControlName="name" placeholder="customer-clusters">
       </mat-form-field>
-      <br>
 
-      <mat-form-field>
-        <mat-label>Algorithm</mat-label>
-        <mat-select formControlName="algorithm">
-          <mat-option value="org.apache.spark.examples.SparkPi">SparkPi</mat-option>
-          <mat-option value="org.apache.spark.examples.SparkKMeans">K-Means</mat-option>
-          <mat-option value="org.apache.spark.examples.SparkLR">Logistic Regression</mat-option>
+      <mat-divider></mat-divider>
+
+      <!-- ============================= INPUT ============================= -->
+      <h3>Input data</h3>
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Data Path</mat-label>
+        <input matInput formControlName="inputPath" placeholder="/data/customers.csv">
+        <mat-hint>Path readable by the Spark cluster</mat-hint>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Format</mat-label>
+        <mat-select formControlName="inputFormat">
+          <mat-option *ngFor="let format of formats" [value]="format">{{format}}</mat-option>
         </mat-select>
       </mat-form-field>
-      <br>
 
-      <div class="file-upload">
-        <label>Data File (JSON)</label>
-        <br>
-        <input type="file" accept=".json" (change)="onFileSelected($event)">
-        <span>{{fileName || 'No file selected'}}</span>
+      <div class="checkbox-row" *ngIf="pipelineForm.get('inputFormat')?.value === 'csv'">
+        <mat-checkbox formControlName="header">First row is a header</mat-checkbox>
+        <mat-checkbox formControlName="inferSchema">Infer column types</mat-checkbox>
       </div>
-      <br>
 
-      <mat-form-field>
-        <mat-label>Executor Instances</mat-label>
-        <input matInput type="number" formControlName="instances">
+      <mat-divider></mat-divider>
+
+      <!-- ============================= STEPS ============================= -->
+      <h3>
+        Transformations
+        <button mat-mini-fab color="accent" type="button" (click)="addStep()"
+                matTooltip="Add a transformation step">
+          <mat-icon>add</mat-icon>
+        </button>
+      </h3>
+      <p class="hint" *ngIf="steps.length === 0">No transformations &mdash; the data is used as-is.</p>
+
+      <div formArrayName="steps">
+        <div class="step-row" *ngFor="let step of steps.controls; let i = index" [formGroupName]="i">
+
+          <mat-form-field appearance="outline" class="step-type">
+            <mat-label>Step {{i + 1}}</mat-label>
+            <mat-select formControlName="type">
+              <mat-option *ngFor="let type of stepTypes" [value]="type.value">{{type.label}}</mat-option>
+            </mat-select>
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="step-arg" *ngIf="stepType(i) === 'select'">
+            <mat-label>Columns (comma separated)</mat-label>
+            <input matInput formControlName="columns" placeholder="age, income">
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="step-arg" *ngIf="stepType(i) === 'filter'">
+            <mat-label>Condition (SQL)</mat-label>
+            <input matInput formControlName="condition" placeholder="age > 18">
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="step-arg" *ngIf="stepType(i) === 'limit'">
+            <mat-label>Number of rows</mat-label>
+            <input matInput type="number" formControlName="n">
+          </mat-form-field>
+
+          <button mat-icon-button color="warn" type="button" (click)="removeStep(i)"
+                  matTooltip="Remove this step">
+            <mat-icon>delete</mat-icon>
+          </button>
+        </div>
+      </div>
+
+      <mat-divider></mat-divider>
+
+      <!-- =========================== ALGORITHM =========================== -->
+      <h3>Algorithm</h3>
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Algorithm</mat-label>
+        <mat-select formControlName="algorithm">
+          <mat-option *ngFor="let algorithm of algorithms" [value]="algorithm.value">
+            {{algorithm.label}}
+          </mat-option>
+        </mat-select>
       </mat-form-field>
-      <br>
 
-      <mat-form-field>
-        <mat-label>Executor Cores</mat-label>
-        <input matInput type="number" formControlName="cores">
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Feature Columns (comma separated)</mat-label>
+        <input matInput formControlName="features" placeholder="age, income">
       </mat-form-field>
-      <br>
 
-      <mat-form-field>
-        <mat-label>Executor Memory (MB)</mat-label>
-        <input matInput type="number" formControlName="memory">
+      <mat-form-field appearance="outline" class="full-width" *ngIf="labelRequired">
+        <mat-label>Label Column</mat-label>
+        <input matInput formControlName="label" placeholder="churned">
+        <mat-hint>Required for supervised algorithms</mat-hint>
       </mat-form-field>
-      <br>
 
-      <mat-form-field>
+      <div formGroupName="params" class="params-row">
+        <mat-form-field appearance="outline" *ngFor="let param of selectedAlgorithm?.params">
+          <mat-label>{{param.label}}</mat-label>
+          <input matInput type="number" [formControlName]="param.name">
+        </mat-form-field>
+      </div>
+
+      <mat-divider></mat-divider>
+
+      <!-- ============================= OUTPUT ============================= -->
+      <h3>Output</h3>
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Output Path (optional)</mat-label>
+        <input matInput formControlName="outputPath" placeholder="/data/results">
+        <mat-hint>Leave empty to only print the first rows of the result</mat-hint>
+      </mat-form-field>
+
+      <ng-container *ngIf="pipelineForm.get('outputPath')?.value">
+        <mat-form-field appearance="outline">
+          <mat-label>Format</mat-label>
+          <mat-select formControlName="outputFormat">
+            <mat-option *ngFor="let format of formats" [value]="format">{{format}}</mat-option>
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="outline">
+          <mat-label>Write Mode</mat-label>
+          <mat-select formControlName="outputMode">
+            <mat-option *ngFor="let mode of writeModes" [value]="mode">{{mode}}</mat-option>
+          </mat-select>
+        </mat-form-field>
+      </ng-container>
+
+      <mat-divider></mat-divider>
+
+      <!-- =========================== RESOURCES =========================== -->
+      <h3>Cluster resources</h3>
+      <div class="params-row">
+        <mat-form-field appearance="outline">
+          <mat-label>Executor Instances</mat-label>
+          <input matInput type="number" formControlName="instances">
+        </mat-form-field>
+
+        <mat-form-field appearance="outline">
+          <mat-label>Executor Cores</mat-label>
+          <input matInput type="number" formControlName="cores">
+        </mat-form-field>
+
+        <mat-form-field appearance="outline">
+          <mat-label>Executor Memory (MB)</mat-label>
+          <input matInput type="number" formControlName="memory">
+        </mat-form-field>
+      </div>
+
+      <mat-form-field appearance="outline" class="full-width">
         <mat-label>Container Image</mat-label>
         <input matInput formControlName="image">
       </mat-form-field>
-      <br>
 
-      <div *ngIf="pipelineCreated" style="color: green; margin: 10px 0;">
-      Pipeline created successfully! 
-      <br>
-      <a mat-raised-button color="primary" href="/#/user-menu">Go to Dashboard</a>
-      </div>
-      <div *ngIf="pipelineError" style="color: red; margin: 10px 0;">
-       Error creating pipeline.
-      </div>
-      <div *ngIf="noFileError" style="color: orange; margin: 10px 0;">
-      Please select a JSON data file.
+      <mat-divider></mat-divider>
+
+      <!-- ============================ ACTIONS ============================ -->
+      <div class="actions">
+        <button mat-stroked-button color="primary" type="button"
+                (click)="previewProgram()" [disabled]="busy">
+          <mat-icon>visibility</mat-icon>
+          Preview generated program
+        </button>
+
+        <button mat-raised-button color="primary" type="button"
+                (click)="createPipeline()" [disabled]="busy">
+          <mat-icon>play_arrow</mat-icon>
+          Create pipeline
+        </button>
       </div>
 
-      <button mat-fab color="primary" (click)="submitPipeline()">
-        <mat-icon>check</mat-icon>
-      </button>
+      <!-- ============================ FEEDBACK ============================ -->
+      <div class="feedback success" *ngIf="successMessage">
+        <mat-icon>check_circle</mat-icon>
+        {{successMessage}}
+        <br>
+        <a mat-raised-button color="primary" href="/#/user-menu">Go to Dashboard</a>
+      </div>
+
+      <div class="feedback error" *ngIf="errorMessage">
+        <mat-icon>error</mat-icon>
+        {{errorMessage}}
+        <ul *ngIf="validationErrors.length">
+          <li *ngFor="let error of validationErrors">{{error}}</li>
+        </ul>
+      </div>
+
+      <!-- ======================= GENERATED PROGRAM ======================= -->
+      <div class="generated" *ngIf="generatedProgram">
+        <h3>Generated PySpark program</h3>
+        <pre>{{generatedProgram}}</pre>
+      </div>
 
     </form>
   </mat-card-content>

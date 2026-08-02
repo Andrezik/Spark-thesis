@@ -33,6 +33,8 @@ services:
       PROXMOX: $PROXMOX
     volumes:
       - uploads_vol:/KubernetesAPI/backend/uploads
+      # Read-only: the option definitions the API seeds into MongoDB on start-up
+      - ./database:/KubernetesAPI/database:ro
 
   kubernetes-ui:
     build: ./frontend
@@ -46,6 +48,10 @@ services:
     build: ./executor
     container_name: executor
     restart: always
+    volumes:
+      # Same mount point as in kubernetes-api, so the executable path stored
+      # with a job resolves to the same file in both containers.
+      - uploads_vol:/KubernetesAPI/backend/uploads
     environment:
       DB_URL: mongo
       DB_USERNAME: $DB_USERNAME

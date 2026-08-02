@@ -4,6 +4,7 @@
 import subprocess   # Running spark submit
 import time     # Timings
 import DatabaseConnection as dc
+import SparkCommandGenerator as scg    # JSON -> spark-submit command
 import os
 
 ''' FUNCTIONS '''
@@ -30,39 +31,25 @@ def job_selector():
 
 # Edit & Run job
 def job_executor(job):
-    # Making one string job from options of job
-    spark_submit = ""
     print(f"{job['options']}\n")
-    for option in job['options']:
-        if option == 'spark_path':
-            spark_submit += f"{job['options'][option]}\\\n"
-            # spark_submit += f"{job['options'][option]} \n"
-        elif option == 'executable':
-            spark_submit += f"local:///{job['options'][option][2:]} \n"
-        elif option == 'conf':
-            for conf in job['options'][option]:
-                spark_submit += f"--conf {conf}={job['options'][option][conf]} \n"
-        elif option == 'additional_options':
-            for a in job['options'][option]:
-                add_conf = job['options'][option][a]
-                spark_submit += f"--conf {add_conf['confKey']}={add_conf['confValue']} \n"
-        else:
-            if option == 'name':    # Removing space from value of option name
-                job['options'][option] = job['options'][option].replace(" ", "")
-            spark_submit += f"--{option} {job['options'][option]} \n"
 
-    print(spark_submit)
+    # Building the spark-submit command (validated against the DB option
+    # definitions) as a list of args - no shell=True, no manual string
+    # concatenation.
+    try:
+        spark_submit_args = scg.generate_spark_submit_args(job['options'])
+    except scg.SparkCommandValidationError as e:
+        message = f"Invalid job options: {e.errors}"
+        print(f"\n{message}\n")
+        dc.add_log(job, message)
+        return "Subprocess didn't run"
+
+    print(f"\nCommand:\n{scg.to_display_string(spark_submit_args)}\n")
+
     # Run job
     cwd = os.getcwd()
     print(f'\nCurrent Path: {cwd}\n')
-    directories = subprocess.run(["dir"], shell=True, capture_output=True, text=True)
-    print(f'\nThe directories of the path {cwd} are: \n{directories.stdout}\n')
-    # os.chdir("/opt")
-    # cwd = os.getcwd()
-    # print(f'\nNew Path: {cwd}\n')
-    # new_directories = subprocess.run(["dir"], shell=True, capture_output=True, text=True)
-    # print(f'\nThe directories of the path {cwd} are: \n{new_directories.stdout}\n')
-    result = subprocess.run([spark_submit], shell=True, capture_output=True, text=True)
+    result = subprocess.run(spark_submit_args, shell=False, capture_output=True, text=True)
     print(result.stderr)
     if result.stdout == '':
         result.stdout = "Subprocess didn't run"

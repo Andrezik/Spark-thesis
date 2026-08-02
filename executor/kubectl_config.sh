@@ -1,6 +1,6 @@
 #!/bin/bash
 
-tee ~/.kube/config-kubectl > /dev/null <<EOT
+tee ~/.kube/config > /dev/null <<EOT
 apiVersion: v1
 clusters:
 - cluster:

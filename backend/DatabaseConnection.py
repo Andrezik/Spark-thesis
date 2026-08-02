@@ -5,6 +5,16 @@ import pymongo  # MongoDB
 from bson import ObjectId   # ObjectId casting
 import os
 import datetime
+import json
+
+''' CONSTANTS '''
+# Single source of truth for the name of the option-definitions collection.
+# Previously this name was written three different ways across the codebase
+# ('Options', 'options' and - in mongo-init.sh - 'οptions' with a Greek omicron),
+# which meant the definitions were never found and validation silently passed.
+OPTIONS_COLLECTION = 'options'
+# Definitions used to seed the collection when it is empty (see seed_options).
+OPTIONS_SEED_FILE = os.environ.get('OPTIONS_SEED_FILE', './database/Kubernetes.Options.json')
 
 ''' FUNCTIONS '''
 # Connecting with database (returns collection access)
@@ -126,13 +136,13 @@ def update_job(job_id, options):
 
 
 def add_option(option):
-    col = database_connection('Options')
+    col = database_connection(OPTIONS_COLLECTION)
     inserted_option = col.insert_one(option)
     print(f'\nOption inserted with id={inserted_option.inserted_id}\n')
 
 
 def retrieve_options():
-    col = database_connection('options')
+    col = database_connection(OPTIONS_COLLECTION)
     options = []
     for option in col.find():
         option['id'] = str(option['_id'])
@@ -142,9 +152,42 @@ def retrieve_options():
 
 
 def find_option_by_name(name):
-    col = database_connection('options')
+    col = database_connection(OPTIONS_COLLECTION)
     option = col.find_one({'name': name})  # Searching option by name
     return option
+
+
+# Loads the option definitions into the database when the collection is empty.
+#
+# The MongoDB image only runs the scripts in docker-entrypoint-initdb.d when the
+# data directory is empty. Because mongo_vol is declared as an external volume,
+# a volume that has already been used never gets initialised again - so the
+# option definitions could stay missing forever. Seeding here, at API start-up,
+# makes the system self-healing regardless of the state of the volume.
+# The function is idempotent: with a non-empty collection it does nothing.
+def seed_options():
+    col = database_connection(OPTIONS_COLLECTION)
+    existing = col.count_documents({})
+    if existing > 0:
+        print(f'\nOption definitions already present ({existing} documents), skipping seed\n')
+        return existing
+
+    if not os.path.exists(OPTIONS_SEED_FILE):
+        print(f'\nWARNING: option definitions file not found at {OPTIONS_SEED_FILE}; '
+              f'validation against the option schema will not work\n')
+        return 0
+
+    with open(OPTIONS_SEED_FILE, encoding='utf-8') as seed_file:
+        definitions = json.load(seed_file)
+
+    # The exported file carries MongoDB _id values; drop them so the insert
+    # cannot fail on a duplicate key from an earlier export.
+    for definition in definitions:
+        definition.pop('_id', None)
+
+    col.insert_many(definitions)
+    print(f'\nSeeded {len(definitions)} option definitions into "{OPTIONS_COLLECTION}"\n')
+    return len(definitions)
 
 
 # Retrieving list with jobs for execution

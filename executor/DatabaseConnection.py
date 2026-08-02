@@ -6,6 +6,12 @@ from bson import ObjectId   # ObjectId casting
 import os
 import datetime
 
+''' CONSTANTS '''
+# Must match OPTIONS_COLLECTION in backend/DatabaseConnection.py. This file used
+# to read from 'Options' while the backend read from 'options', so the executor
+# and the API were looking at two different (empty) collections.
+OPTIONS_COLLECTION = 'options'
+
 ''' FUNCTIONS '''
 # Connecting with database (returns collection access)
 def database_connection(col):
@@ -126,13 +132,13 @@ def update_job(job_id, options):
 
 
 def add_option(option):
-    col = database_connection('Options')
+    col = database_connection(OPTIONS_COLLECTION)
     inserted_option = col.insert_one(option)
     print(f'\nOption inserted with id={inserted_option.inserted_id}\n')
 
 
 def retrieve_options():
-    col = database_connection('Options')
+    col = database_connection(OPTIONS_COLLECTION)
     options = []
     for option in col.find():
         option['id'] = str(option['_id'])
@@ -142,7 +148,7 @@ def retrieve_options():
 
 
 def find_option_by_name(name):
-    col = database_connection('Options')
+    col = database_connection(OPTIONS_COLLECTION)
     option = col.find_one({'name': name})  # Searching option by name
     return option
 
