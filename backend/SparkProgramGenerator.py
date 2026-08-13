@@ -11,22 +11,44 @@ Specification shape
 -------------------
 {
   "name": "my-pipeline",
+
   "input":  {"path": "/data/in.csv", "format": "csv",
              "options": {"header": "true", "inferSchema": "true"}},
+
   "steps":  [                                   # optional, applied in order
       {"type": "select", "columns": ["a", "b"]},
       {"type": "filter", "condition": "a > 10"},
       {"type": "dropna"},
-      {"type": "limit",  "n": 1000}
+      {"type": "limit",  "n": 1000},
+      {"type": "string_indexer",   "inputCol": "city", "outputCol": "city_idx"},
+      {"type": "one_hot_encoder",  "inputCol": "city_idx", "outputCol": "city_vec"}
   ],
-  "algorithm": {"name": "kmeans",
-                "features": ["a", "b"],
-                "params": {"k": 3, "maxIter": 20}},
+
+  "stages": [                                   # one or more, applied in order
+      {"name": "kmeans",
+       "features": ["a", "b"],
+       "scaler": "minmax",                      # optional: minmax | standard
+       "params": {"k": 3, "maxIter": 20}},
+
+      {"name": "logistic_regression",           # may use prediction_1 as a feature
+       "features": ["a", "b", "prediction_1"],
+       "label": "churned",
+       "params": {"maxIter": 10}}
+  ],
+
   "output": {"path": "/data/out", "format": "parquet", "mode": "overwrite"}
 }
 
-Only "input" and "algorithm" are strictly required; everything else has
-sensible defaults.
+Chaining
+--------
+Each stage transforms the DataFrame and adds its own columns, so a later stage
+sees everything the earlier ones produced. To keep the columns apart, stage N
+writes to 'features_N' and 'prediction_N' (plus 'raw_prediction_N' and
+'probability_N' for classifiers). A stage can therefore list 'prediction_1'
+among its own features.
+
+A single "algorithm" object is still accepted in place of "stages" and is
+treated as a one-stage pipeline.
 
 Safety note
 -----------
@@ -44,43 +66,103 @@ import re
 # Each entry describes one supported algorithm:
 #   estimator      -> the pyspark.ml class to instantiate
 #   module         -> where to import it from
-#   kind           -> 'clustering' | 'classification' | 'regression'
+#   category       -> 'clustering' | 'classification' | 'regression'
 #   label_required -> does it need a label column (supervised)?
+#   prediction_cols-> the *Col parameters whose value must be made unique per stage
 #   params         -> {param_name: (python_type, default)}
 ALGORITHMS = {
     'kmeans': {
         'estimator': 'KMeans',
         'module': 'pyspark.ml.clustering',
-        'kind': 'clustering',
+        'category': 'clustering',
         'label_required': False,
+        'prediction_cols': ['predictionCol'],
         'params': {'k': (int, 3), 'maxIter': (int, 20), 'seed': (int, 1)},
+    },
+    'bisecting_kmeans': {
+        'estimator': 'BisectingKMeans',
+        'module': 'pyspark.ml.clustering',
+        'category': 'clustering',
+        'label_required': False,
+        'prediction_cols': ['predictionCol'],
+        'params': {'k': (int, 4), 'maxIter': (int, 20), 'seed': (int, 1)},
+    },
+    'gaussian_mixture': {
+        'estimator': 'GaussianMixture',
+        'module': 'pyspark.ml.clustering',
+        'category': 'clustering',
+        'label_required': False,
+        'prediction_cols': ['predictionCol', 'probabilityCol'],
+        'params': {'k': (int, 2), 'maxIter': (int, 100), 'seed': (int, 1)},
     },
     'logistic_regression': {
         'estimator': 'LogisticRegression',
         'module': 'pyspark.ml.classification',
-        'kind': 'classification',
+        'category': 'classification',
         'label_required': True,
-        'params': {'maxIter': (int, 10), 'regParam': (float, 0.0)},
-    },
-    'linear_regression': {
-        'estimator': 'LinearRegression',
-        'module': 'pyspark.ml.regression',
-        'kind': 'regression',
-        'label_required': True,
+        'prediction_cols': ['predictionCol', 'rawPredictionCol', 'probabilityCol'],
         'params': {'maxIter': (int, 10), 'regParam': (float, 0.0)},
     },
     'decision_tree': {
         'estimator': 'DecisionTreeClassifier',
         'module': 'pyspark.ml.classification',
-        'kind': 'classification',
+        'category': 'classification',
         'label_required': True,
+        'prediction_cols': ['predictionCol', 'rawPredictionCol', 'probabilityCol'],
+        'params': {'maxDepth': (int, 5)},
+    },
+    'random_forest': {
+        'estimator': 'RandomForestClassifier',
+        'module': 'pyspark.ml.classification',
+        'category': 'classification',
+        'label_required': True,
+        'prediction_cols': ['predictionCol', 'rawPredictionCol', 'probabilityCol'],
+        'params': {'numTrees': (int, 20), 'maxDepth': (int, 5), 'seed': (int, 1)},
+    },
+    'linear_regression': {
+        'estimator': 'LinearRegression',
+        'module': 'pyspark.ml.regression',
+        'category': 'regression',
+        'label_required': True,
+        'prediction_cols': ['predictionCol'],
+        'params': {'maxIter': (int, 10), 'regParam': (float, 0.0)},
+    },
+    'decision_tree_regressor': {
+        'estimator': 'DecisionTreeRegressor',
+        'module': 'pyspark.ml.regression',
+        'category': 'regression',
+        'label_required': True,
+        'prediction_cols': ['predictionCol'],
         'params': {'maxDepth': (int, 5)},
     },
 }
 
+# Human readable names for the categories, in the order the form should show them
+CATEGORIES = [
+    ('clustering', 'Clustering'),
+    ('classification', 'Classification'),
+    ('regression', 'Regression'),
+]
+
+''' FEATURE SCALERS '''
+# Applied to the assembled feature vector of a stage, before the estimator.
+SCALERS = {
+    'minmax': {'transformer': 'MinMaxScaler', 'module': 'pyspark.ml.feature'},
+    'standard': {'transformer': 'StandardScaler', 'module': 'pyspark.ml.feature'},
+}
+
+''' COLUMN-LEVEL FEATURE TRANSFORMERS '''
+# Applied as ordinary steps, before any feature vector is assembled.
+COLUMN_TRANSFORMERS = {
+    'string_indexer': {'transformer': 'StringIndexer', 'module': 'pyspark.ml.feature', 'fits': True},
+    'one_hot_encoder': {'transformer': 'OneHotEncoder', 'module': 'pyspark.ml.feature', 'fits': True},
+}
+
 SUPPORTED_FORMATS = {'csv', 'json', 'parquet', 'orc', 'text'}
 SUPPORTED_WRITE_MODES = {'overwrite', 'append', 'ignore', 'error'}
-SUPPORTED_STEPS = {'select', 'filter', 'dropna', 'limit'}
+# Plain DataFrame operations
+DATAFRAME_STEPS = {'select', 'filter', 'dropna', 'limit'}
+SUPPORTED_STEPS = DATAFRAME_STEPS | set(COLUMN_TRANSFORMERS)
 
 # A conservative identifier check for column names
 _COLUMN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_ .-]*$')
@@ -94,11 +176,116 @@ class PipelineSpecError(Exception):
         super().__init__('Invalid pipeline specification: ' + '; '.join(errors))
 
 
+''' HELPERS '''
+
+def _stages_of(spec):
+    """
+    Returns the list of algorithm stages.
+
+    Accepts either the current "stages" list or a single "algorithm" object,
+    so specifications produced before multi-stage support still work.
+    """
+    if isinstance(spec, dict):
+        if isinstance(spec.get('stages'), list):
+            return spec['stages']
+        if isinstance(spec.get('algorithm'), dict):
+            return [spec['algorithm']]
+    return []
+
+
+def _features_col(index, scaled=False):
+    return f'features_{index}_raw' if scaled else f'features_{index}'
+
+
+def _prediction_col(param_name, index):
+    """ 'predictionCol' -> 'prediction_1', 'rawPredictionCol' -> 'raw_prediction_1' """
+    base = param_name[:-3]  # drop the trailing 'Col'
+    snake = re.sub(r'(?<!^)(?=[A-Z])', '_', base).lower()
+    return f'{snake}_{index}'
+
+
 ''' VALIDATION '''
 
 def _validate_column(name, where, errors):
     if not isinstance(name, str) or not _COLUMN_RE.match(name):
         errors.append(f'{where}: invalid column name {name!r}')
+
+
+def _validate_step(step, where, errors):
+    step_type = step.get('type')
+    if step_type not in SUPPORTED_STEPS:
+        errors.append(f'{where}.type: {step_type!r} is not one of {sorted(SUPPORTED_STEPS)}')
+        return
+
+    if step_type == 'select':
+        columns = step.get('columns')
+        if not isinstance(columns, list) or not columns:
+            errors.append(f'{where}.columns: must be a non-empty list')
+        else:
+            for column in columns:
+                _validate_column(column, f'{where}.columns', errors)
+
+    elif step_type == 'filter':
+        if not isinstance(step.get('condition'), str) or not step['condition'].strip():
+            errors.append(f'{where}.condition: must be a non-empty string')
+
+    elif step_type == 'limit':
+        try:
+            if int(step.get('n')) <= 0:
+                errors.append(f'{where}.n: must be a positive integer')
+        except (TypeError, ValueError):
+            errors.append(f'{where}.n: must be a positive integer')
+
+    elif step_type in COLUMN_TRANSFORMERS:
+        for field in ('inputCol', 'outputCol'):
+            value = step.get(field)
+            if not value:
+                errors.append(f'{where}.{field}: is required for {step_type}')
+            else:
+                _validate_column(value, f'{where}.{field}', errors)
+
+
+def _validate_stage(stage, where, errors):
+    if not isinstance(stage, dict):
+        errors.append(f'{where}: must be an object')
+        return
+
+    definition = ALGORITHMS.get(stage.get('name'))
+    if definition is None:
+        errors.append(f'{where}.name: {stage.get("name")!r} is not one of {sorted(ALGORITHMS)}')
+        return
+
+    features = stage.get('features')
+    if not isinstance(features, list) or not features:
+        errors.append(f'{where}.features: must be a non-empty list of column names')
+    else:
+        for column in features:
+            _validate_column(column, f'{where}.features', errors)
+
+    if definition['label_required']:
+        label = stage.get('label')
+        if not label:
+            errors.append(f'{where}.label: is required for {stage["name"]}')
+        else:
+            _validate_column(label, f'{where}.label', errors)
+
+    scaler = stage.get('scaler')
+    if scaler not in (None, '', *SCALERS):
+        errors.append(f'{where}.scaler: {scaler!r} is not one of {sorted(SCALERS)}')
+
+    params = stage.get('params', {})
+    if not isinstance(params, dict):
+        errors.append(f'{where}.params: must be an object')
+    else:
+        for key, value in params.items():
+            if key not in definition['params']:
+                errors.append(f'{where}.params.{key}: not supported by {stage["name"]}')
+                continue
+            expected_type = definition['params'][key][0]
+            try:
+                expected_type(value)
+            except (TypeError, ValueError):
+                errors.append(f'{where}.params.{key}: expected {expected_type.__name__}')
 
 
 def validate_spec(spec):
@@ -135,68 +322,18 @@ def validate_spec(spec):
         errors.append('steps: must be a list')
     else:
         for i, step in enumerate(steps):
-            where = f'steps[{i}]'
             if not isinstance(step, dict):
-                errors.append(f'{where}: must be an object')
-                continue
-            step_type = step.get('type')
-            if step_type not in SUPPORTED_STEPS:
-                errors.append(f'{where}.type: {step_type!r} is not one of {sorted(SUPPORTED_STEPS)}')
-                continue
-            if step_type == 'select':
-                columns = step.get('columns')
-                if not isinstance(columns, list) or not columns:
-                    errors.append(f'{where}.columns: must be a non-empty list')
-                else:
-                    for column in columns:
-                        _validate_column(column, f'{where}.columns', errors)
-            elif step_type == 'filter':
-                if not isinstance(step.get('condition'), str) or not step['condition'].strip():
-                    errors.append(f'{where}.condition: must be a non-empty string')
-            elif step_type == 'limit':
-                try:
-                    if int(step.get('n')) <= 0:
-                        errors.append(f'{where}.n: must be a positive integer')
-                except (TypeError, ValueError):
-                    errors.append(f'{where}.n: must be a positive integer')
+                errors.append(f'steps[{i}]: must be an object')
+            else:
+                _validate_step(step, f'steps[{i}]', errors)
 
-    # -- algorithm --------------------------------------------------------
-    algorithm = spec.get('algorithm')
-    if not isinstance(algorithm, dict):
-        errors.append('algorithm: missing or not an object')
+    # -- stages -----------------------------------------------------------
+    stages = _stages_of(spec)
+    if not stages:
+        errors.append('stages: at least one algorithm stage is required')
     else:
-        algorithm_name = algorithm.get('name')
-        definition = ALGORITHMS.get(algorithm_name)
-        if definition is None:
-            errors.append(f'algorithm.name: {algorithm_name!r} is not one of {sorted(ALGORITHMS)}')
-        else:
-            features = algorithm.get('features')
-            if not isinstance(features, list) or not features:
-                errors.append('algorithm.features: must be a non-empty list of column names')
-            else:
-                for column in features:
-                    _validate_column(column, 'algorithm.features', errors)
-
-            if definition['label_required']:
-                label = algorithm.get('label')
-                if not label:
-                    errors.append(f'algorithm.label: is required for {algorithm_name}')
-                else:
-                    _validate_column(label, 'algorithm.label', errors)
-
-            params = algorithm.get('params', {})
-            if not isinstance(params, dict):
-                errors.append('algorithm.params: must be an object')
-            else:
-                for key, value in params.items():
-                    if key not in definition['params']:
-                        errors.append(f'algorithm.params.{key}: not supported by {algorithm_name}')
-                        continue
-                    expected_type = definition['params'][key][0]
-                    try:
-                        expected_type(value)
-                    except (TypeError, ValueError):
-                        errors.append(f'algorithm.params.{key}: expected {expected_type.__name__}')
+        for i, stage in enumerate(stages):
+            _validate_stage(stage, f'stages[{i}]', errors)
 
     # -- output -----------------------------------------------------------
     sink = spec.get('output')
@@ -247,8 +384,9 @@ def _reader_lines(source):
 def _step_lines(steps):
     """ Lines for the optional transformation steps. """
     lines = []
-    for step in steps:
+    for index, step in enumerate(steps, start=1):
         step_type = step['type']
+
         if step_type == 'select':
             lines.append('df = df.select(*{!r})'.format(list(step['columns'])))
         elif step_type == 'filter':
@@ -257,46 +395,105 @@ def _step_lines(steps):
             lines.append('df = df.dropna()')
         elif step_type == 'limit':
             lines.append('df = df.limit({!r})'.format(int(step['n'])))
+        elif step_type in COLUMN_TRANSFORMERS:
+            definition = COLUMN_TRANSFORMERS[step_type]
+            variable = f'{step_type}_{index}'
+            lines.append('{} = {}(inputCol={!r}, outputCol={!r})'.format(
+                variable, definition['transformer'], step['inputCol'], step['outputCol']))
+            if definition['fits']:
+                # StringIndexer and OneHotEncoder are Estimators: they learn from
+                # the data first, then transform it.
+                lines.append('df = {}.fit(df).transform(df)'.format(variable))
+            else:
+                lines.append('df = {}.transform(df)'.format(variable))
     return lines
 
 
-def _algorithm_lines(algorithm):
-    """ Lines that assemble the features, fit the estimator and produce predictions. """
-    name = algorithm['name']
+def _stage_lines(stage, index):
+    """
+    Lines for one algorithm stage.
+
+    Every stage reads the DataFrame produced by the previous one and adds its
+    own columns, suffixed with the stage number so nothing collides.
+    """
+    name = stage['name']
     definition = ALGORITHMS[name]
-    features = list(algorithm['features'])
-    params = _coerce_params(name, algorithm.get('params') or {})
+    features = list(stage['features'])
+    scaler_name = stage.get('scaler') or None
+    params = _coerce_params(name, stage.get('params') or {})
+
+    features_col = _features_col(index)
+    assembler_output = _features_col(index, scaled=bool(scaler_name))
 
     lines = [
-        'assembler = VectorAssembler(inputCols={!r}, outputCol="features")'.format(features),
-        'data = assembler.transform(df)',
-        '',
+        f'# --- stage {index}: {name} ---',
+        'assembler_{} = VectorAssembler(inputCols={!r}, outputCol={!r})'.format(
+            index, features, assembler_output),
+        'data = assembler_{}.transform(data)'.format(index),
     ]
 
-    estimator_args = ['featuresCol="features"']
+    if scaler_name:
+        scaler = SCALERS[scaler_name]
+        lines.append('scaler_{} = {}(inputCol={!r}, outputCol={!r})'.format(
+            index, scaler['transformer'], assembler_output, features_col))
+        lines.append('data = scaler_{}.fit(data).transform(data)'.format(index))
+
+    estimator_args = ['featuresCol={!r}'.format(features_col)]
     if definition['label_required']:
-        estimator_args.append('labelCol={!r}'.format(algorithm['label']))
+        estimator_args.append('labelCol={!r}'.format(stage['label']))
+    for prediction_param in definition['prediction_cols']:
+        estimator_args.append('{}={!r}'.format(prediction_param, _prediction_col(prediction_param, index)))
     for key, value in params.items():
         estimator_args.append('{}={!r}'.format(key, value))
 
-    lines.append('estimator = {}({})'.format(definition['estimator'], ', '.join(estimator_args)))
-    lines.append('model = estimator.fit(data)')
-    lines.append('result = model.transform(data)')
+    lines.append('estimator_{} = {}({})'.format(index, definition['estimator'], ', '.join(estimator_args)))
+    lines.append('model_{} = estimator_{}.fit(data)'.format(index, index))
+    lines.append('data = model_{}.transform(data)'.format(index))
     return lines
 
 
-def _writer_lines(sink):
+def _writer_lines(sink, stages):
     """ Lines that write the result out, or just show it when no output is configured. """
+    # Vector columns cannot be written to every format, so they are dropped
+    vector_columns = []
+    for index, stage in enumerate(stages, start=1):
+        vector_columns.append(_features_col(index))
+        if stage.get('scaler'):
+            vector_columns.append(_features_col(index, scaled=True))
+        for prediction_param in ALGORITHMS[stage['name']]['prediction_cols']:
+            if prediction_param != 'predictionCol':
+                vector_columns.append(_prediction_col(prediction_param, index))
+
     if not sink:
-        return ['result.show(20, truncate=False)']
+        return ['result = data', 'result.show(20, truncate=False)']
 
     fmt = sink.get('format', 'parquet')
     mode = sink.get('mode', 'overwrite')
     return [
-        '# The "features" column is a Vector and cannot be written to every format',
-        'output_df = result.drop("features")',
-        'output_df.write.format({!r}).mode({!r}).save({!r})'.format(fmt, mode, sink['path']),
+        '# Vector columns cannot be written to every format',
+        'result = data.drop(*{!r})'.format(vector_columns),
+        'result.write.format({!r}).mode({!r}).save({!r})'.format(fmt, mode, sink['path']),
     ]
+
+
+def _imports(spec, stages):
+    """ The import lines the generated program needs, without duplicates. """
+    needed = {'from pyspark.ml.feature import VectorAssembler'}
+
+    for stage in stages:
+        definition = ALGORITHMS[stage['name']]
+        needed.add('from {} import {}'.format(definition['module'], definition['estimator']))
+        scaler_name = stage.get('scaler')
+        if scaler_name:
+            scaler = SCALERS[scaler_name]
+            needed.add('from {} import {}'.format(scaler['module'], scaler['transformer']))
+
+    for step in spec.get('steps') or []:
+        definition = COLUMN_TRANSFORMERS.get(step.get('type'))
+        if definition:
+            needed.add('from {} import {}'.format(definition['module'], definition['transformer']))
+
+    return sorted(needed)
 
 
 def generate_program(spec, skip_validation=False):
@@ -311,8 +508,7 @@ def generate_program(spec, skip_validation=False):
         if errors:
             raise PipelineSpecError(errors)
 
-    algorithm = spec['algorithm']
-    definition = ALGORITHMS[algorithm['name']]
+    stages = _stages_of(spec)
     app_name = spec.get('name') or 'generated-pipeline'
 
     body = []
@@ -324,16 +520,22 @@ def generate_program(spec, skip_validation=False):
         body += _step_lines(steps)
         body.append('')
 
-    body += _algorithm_lines(algorithm)
+    body.append('data = df')
     body.append('')
-    body += _writer_lines(spec.get('output'))
+
+    for index, stage in enumerate(stages, start=1):
+        body += _stage_lines(stage, index)
+        body.append('')
+
+    body += _writer_lines(spec.get('output'), stages)
 
     indented_body = '\n'.join('    ' + line if line else '' for line in body)
+    stage_names = ' -> '.join(stage['name'] for stage in stages)
 
     return PROGRAM_TEMPLATE.format(
         app_name=app_name,
-        algorithm_name=algorithm['name'],
-        estimator_import='from {} import {}'.format(definition['module'], definition['estimator']),
+        stage_names=stage_names,
+        imports='\n'.join(_imports(spec, stages)),
         body=indented_body,
     )
 
@@ -342,14 +544,13 @@ PROGRAM_TEMPLATE = '''""" Auto-generated PySpark program
 
 Generated by the spark-submit GUI backend from a pipeline specification.
 Pipeline: {app_name}
-Algorithm: {algorithm_name}
+Stages: {stage_names}
 
 Do not edit by hand - regenerate it from the UI instead.
 """
 
 from pyspark.sql import SparkSession
-from pyspark.ml.feature import VectorAssembler
-{estimator_import}
+{imports}
 
 
 def main():

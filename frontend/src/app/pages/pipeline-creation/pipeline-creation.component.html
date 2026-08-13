@@ -90,6 +90,17 @@
             <input matInput type="number" formControlName="n">
           </mat-form-field>
 
+          <ng-container *ngIf="isColumnTransformer(i)">
+            <mat-form-field appearance="outline" class="step-arg">
+              <mat-label>Input column</mat-label>
+              <input matInput formControlName="inputCol" placeholder="city">
+            </mat-form-field>
+            <mat-form-field appearance="outline" class="step-arg">
+              <mat-label>Output column</mat-label>
+              <input matInput formControlName="outputCol" placeholder="city_idx">
+            </mat-form-field>
+          </ng-container>
+
           <button mat-icon-button color="warn" type="button" (click)="removeStep(i)"
                   matTooltip="Remove this step">
             <mat-icon>delete</mat-icon>
@@ -99,33 +110,76 @@
 
       <mat-divider></mat-divider>
 
-      <!-- =========================== ALGORITHM =========================== -->
-      <h3>Algorithm</h3>
-      <mat-form-field appearance="outline" class="full-width">
-        <mat-label>Algorithm</mat-label>
-        <mat-select formControlName="algorithm">
-          <mat-option *ngFor="let algorithm of algorithms" [value]="algorithm.value">
-            {{algorithm.label}}
-          </mat-option>
-        </mat-select>
-      </mat-form-field>
+      <!-- =========================== ALGORITHMS =========================== -->
+      <h3>
+        Algorithm stages
+        <button mat-mini-fab color="accent" type="button" (click)="addStage()"
+                matTooltip="Add another algorithm stage">
+          <mat-icon>add</mat-icon>
+        </button>
+      </h3>
+      <p class="hint">
+        Stages run in order. Each one sees the columns produced by the previous ones, so a
+        later stage can use <code>prediction_1</code>, <code>prediction_2</code> and so on
+        among its feature columns.
+      </p>
 
-      <mat-form-field appearance="outline" class="full-width">
-        <mat-label>Feature Columns (comma separated)</mat-label>
-        <input matInput formControlName="features" placeholder="age, income">
-      </mat-form-field>
+      <div formArrayName="stages">
+        <div class="stage-card" *ngFor="let stage of stages.controls; let i = index" [formGroupName]="i">
 
-      <mat-form-field appearance="outline" class="full-width" *ngIf="labelRequired">
-        <mat-label>Label Column</mat-label>
-        <input matInput formControlName="label" placeholder="churned">
-        <mat-hint>Required for supervised algorithms</mat-hint>
-      </mat-form-field>
+          <div class="stage-header">
+            <span class="stage-number">Stage {{i + 1}}</span>
+            <button mat-icon-button color="warn" type="button" (click)="removeStage(i)"
+                    [disabled]="stages.length === 1"
+                    matTooltip="Remove this stage">
+              <mat-icon>delete</mat-icon>
+            </button>
+          </div>
 
-      <div formGroupName="params" class="params-row">
-        <mat-form-field appearance="outline" *ngFor="let param of selectedAlgorithm?.params">
-          <mat-label>{{param.label}}</mat-label>
-          <input matInput type="number" [formControlName]="param.name">
-        </mat-form-field>
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Algorithm</mat-label>
+            <mat-select formControlName="algorithm">
+              <mat-optgroup *ngFor="let category of categories" [label]="category.label">
+                <mat-option *ngFor="let algorithm of algorithmsOf(category.value)"
+                            [value]="algorithm.value">
+                  {{algorithm.label}}
+                </mat-option>
+              </mat-optgroup>
+            </mat-select>
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Feature Columns (comma separated)</mat-label>
+            <input matInput formControlName="features" placeholder="age, income">
+            <mat-hint *ngIf="availableFrom(i).length">
+              Also available from earlier stages: {{availableFrom(i).join(', ')}}
+            </mat-hint>
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="full-width" *ngIf="stageLabelRequired(i)">
+            <mat-label>Label Column</mat-label>
+            <input matInput formControlName="label" placeholder="churned">
+            <mat-hint>Required for supervised algorithms</mat-hint>
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Feature scaling</mat-label>
+            <mat-select formControlName="scaler">
+              <mat-option *ngFor="let scaler of scalers" [value]="scaler.value">
+                {{scaler.label}}
+              </mat-option>
+            </mat-select>
+            <mat-hint>Applied to the assembled feature vector, before the algorithm runs</mat-hint>
+          </mat-form-field>
+
+          <div formGroupName="params" class="params-row">
+            <mat-form-field appearance="outline" *ngFor="let param of stageDefinition(i)?.params">
+              <mat-label>{{param.label}}</mat-label>
+              <input matInput type="number" [formControlName]="param.name">
+            </mat-form-field>
+          </div>
+
+        </div>
       </div>
 
       <mat-divider></mat-divider>

@@ -32,14 +32,22 @@ interface AlgorithmParam {
 interface AlgorithmDefinition {
   value: string;
   label: string;
+  category: 'clustering' | 'classification' | 'regression';
   labelRequired: boolean;
   params: AlgorithmParam[];
 }
 
+interface AlgorithmCategory {
+  value: string;
+  label: string;
+}
+
 const ALGORITHMS: AlgorithmDefinition[] = [
+  // --- clustering ---
   {
     value: 'kmeans',
-    label: 'K-Means (clustering)',
+    label: 'K-Means',
+    category: 'clustering',
     labelRequired: false,
     params: [
       { name: 'k', label: 'Number of clusters (k)', default: 3 },
@@ -48,17 +56,32 @@ const ALGORITHMS: AlgorithmDefinition[] = [
     ]
   },
   {
-    value: 'logistic_regression',
-    label: 'Logistic Regression (classification)',
-    labelRequired: true,
+    value: 'bisecting_kmeans',
+    label: 'Bisecting K-Means',
+    category: 'clustering',
+    labelRequired: false,
     params: [
-      { name: 'maxIter', label: 'Max iterations', default: 10 },
-      { name: 'regParam', label: 'Regularization parameter', default: 0 }
+      { name: 'k', label: 'Number of clusters (k)', default: 4 },
+      { name: 'maxIter', label: 'Max iterations', default: 20 },
+      { name: 'seed', label: 'Random seed', default: 1 }
     ]
   },
   {
-    value: 'linear_regression',
-    label: 'Linear Regression (regression)',
+    value: 'gaussian_mixture',
+    label: 'Gaussian Mixture',
+    category: 'clustering',
+    labelRequired: false,
+    params: [
+      { name: 'k', label: 'Number of components (k)', default: 2 },
+      { name: 'maxIter', label: 'Max iterations', default: 100 },
+      { name: 'seed', label: 'Random seed', default: 1 }
+    ]
+  },
+  // --- classification ---
+  {
+    value: 'logistic_regression',
+    label: 'Logistic Regression',
+    category: 'classification',
     labelRequired: true,
     params: [
       { name: 'maxIter', label: 'Max iterations', default: 10 },
@@ -67,12 +90,51 @@ const ALGORITHMS: AlgorithmDefinition[] = [
   },
   {
     value: 'decision_tree',
-    label: 'Decision Tree (classification)',
+    label: 'Decision Tree',
+    category: 'classification',
+    labelRequired: true,
+    params: [
+      { name: 'maxDepth', label: 'Max depth', default: 5 }
+    ]
+  },
+  {
+    value: 'random_forest',
+    label: 'Random Forest',
+    category: 'classification',
+    labelRequired: true,
+    params: [
+      { name: 'numTrees', label: 'Number of trees', default: 20 },
+      { name: 'maxDepth', label: 'Max depth', default: 5 },
+      { name: 'seed', label: 'Random seed', default: 1 }
+    ]
+  },
+  // --- regression ---
+  {
+    value: 'linear_regression',
+    label: 'Linear Regression',
+    category: 'regression',
+    labelRequired: true,
+    params: [
+      { name: 'maxIter', label: 'Max iterations', default: 10 },
+      { name: 'regParam', label: 'Regularization parameter', default: 0 }
+    ]
+  },
+  {
+    value: 'decision_tree_regressor',
+    label: 'Decision Tree Regressor',
+    category: 'regression',
     labelRequired: true,
     params: [
       { name: 'maxDepth', label: 'Max depth', default: 5 }
     ]
   }
+];
+
+/** Order and display names of the groups shown in the algorithm dropdown. */
+const CATEGORIES: AlgorithmCategory[] = [
+  { value: 'clustering', label: 'Clustering' },
+  { value: 'classification', label: 'Classification' },
+  { value: 'regression', label: 'Regression' }
 ];
 
 const BACKEND_URL = 'http://localhost:5000';
@@ -102,20 +164,28 @@ export class PipelineCreationComponent implements OnInit {
   user: string = '';
 
   algorithms = ALGORITHMS;
+  categories = CATEGORIES;
   formats = ['csv', 'json', 'parquet', 'orc', 'text'];
   writeModes = ['overwrite', 'append', 'ignore', 'error'];
+  scalers = [
+    { value: '', label: 'None' },
+    { value: 'minmax', label: 'Min-Max scaling (0 to 1)' },
+    { value: 'standard', label: 'Standard scaling (zero mean, unit variance)' }
+  ];
+  stepTypes = [
+    { value: 'select', label: 'Select columns' },
+    { value: 'filter', label: 'Filter rows' },
+    { value: 'dropna', label: 'Drop rows with nulls' },
+    { value: 'limit', label: 'Limit rows' },
+    { value: 'string_indexer', label: 'String Indexer (text to numeric)' },
+    { value: 'one_hot_encoder', label: 'One-Hot Encoder (numeric to vector)' }
+  ];
   // Where the generated program is executed. 'kubernetes' is the original
   // behaviour; 'local' runs it with Spark inside the executor container and
   // needs no cluster.
   targets = [
     { value: 'kubernetes', label: 'Kubernetes cluster' },
     { value: 'local', label: 'Local (inside the executor)' }
-  ];
-  stepTypes = [
-    { value: 'select', label: 'Select columns' },
-    { value: 'filter', label: 'Filter rows' },
-    { value: 'dropna', label: 'Drop rows with nulls' },
-    { value: 'limit', label: 'Limit rows' }
   ];
 
   // Feedback shown to the user
@@ -142,11 +212,8 @@ export class PipelineCreationComponent implements OnInit {
       // --- optional transformations, added by the user ---
       steps: this.fb.array([]),
 
-      // --- the algorithm to apply ---
-      algorithm: ['kmeans', Validators.required],
-      features: ['', Validators.required],
-      label: [''],
-      params: this.fb.group({}),
+      // --- one or more algorithm stages, applied in order ---
+      stages: this.fb.array([]),
 
       // --- where the result goes ---
       outputPath: [''],
@@ -161,42 +228,87 @@ export class PipelineCreationComponent implements OnInit {
       image: ['apache/spark:3.5.0', Validators.required]
     });
 
-    // Build the parameter controls for the initially selected algorithm, and
-    // rebuild them whenever the user picks a different one.
-    this.rebuildParamControls('kmeans');
-    this.pipelineForm.get('algorithm')!.valueChanges.subscribe((value: string) => {
-      this.rebuildParamControls(value);
-    });
+    // A pipeline always has at least one stage
+    this.addStage();
   }
 
   /* ------------------------------------------------------------------ *
-   *  Algorithm-driven controls
+   *  Algorithm stages (dynamic list)
    * ------------------------------------------------------------------ */
 
-  get selectedAlgorithm(): AlgorithmDefinition | undefined {
-    return this.algorithms.find(a => a.value === this.pipelineForm?.get('algorithm')?.value);
+  get stages(): FormArray {
+    return this.pipelineForm.get('stages') as FormArray;
   }
 
-  get labelRequired(): boolean {
-    return this.selectedAlgorithm?.labelRequired === true;
+  /** The algorithms belonging to one category, for the grouped dropdown. */
+  algorithmsOf(category: string): AlgorithmDefinition[] {
+    return this.algorithms.filter(algorithm => algorithm.category === category);
   }
 
-  get paramsGroup(): FormGroup {
-    return this.pipelineForm.get('params') as FormGroup;
+  definitionOf(algorithmValue: string): AlgorithmDefinition | undefined {
+    return this.algorithms.find(algorithm => algorithm.value === algorithmValue);
   }
 
-  /** Replaces the params sub-form with the controls the chosen algorithm needs. */
-  private rebuildParamControls(algorithmValue: string) {
-    const group = this.paramsGroup;
+  stageDefinition(index: number): AlgorithmDefinition | undefined {
+    return this.definitionOf(this.stages.at(index).get('algorithm')!.value);
+  }
+
+  stageLabelRequired(index: number): boolean {
+    return this.stageDefinition(index)?.labelRequired === true;
+  }
+
+  stageParams(index: number): FormGroup {
+    return this.stages.at(index).get('params') as FormGroup;
+  }
+
+  /**
+   * Column names a stage can feed on: the prediction columns produced by every
+   * earlier stage. Shown as a hint so the user knows how to chain stages.
+   */
+  availableFrom(index: number): string[] {
+    const columns: string[] = [];
+    for (let i = 0; i < index; i++) {
+      columns.push(`prediction_${i + 1}`);
+    }
+    return columns;
+  }
+
+  addStage() {
+    const group = this.fb.group({
+      algorithm: ['kmeans', Validators.required],
+      features: ['', Validators.required],
+      label: [''],
+      scaler: [''],
+      params: this.fb.group({})
+    });
+
+    this.stages.push(group);
+    const index = this.stages.length - 1;
+
+    this.rebuildParamControls(index, 'kmeans');
+    group.get('algorithm')!.valueChanges.subscribe((value: string | null) => {
+      this.rebuildParamControls(index, value || '');
+    });
+  }
+
+  removeStage(index: number) {
+    if (this.stages.length > 1) {
+      this.stages.removeAt(index);
+    }
+  }
+
+  /** Replaces a stage's params sub-form with the controls its algorithm needs. */
+  private rebuildParamControls(index: number, algorithmValue: string) {
+    const group = this.stageParams(index);
     Object.keys(group.controls).forEach(key => group.removeControl(key));
 
-    const definition = this.algorithms.find(a => a.value === algorithmValue);
+    const definition = this.definitionOf(algorithmValue);
     definition?.params.forEach(param => {
       group.addControl(param.name, this.fb.control(param.default, Validators.required));
     });
 
     // The label column only applies to supervised algorithms
-    const labelControl = this.pipelineForm.get('label')!;
+    const labelControl = this.stages.at(index).get('label')!;
     if (definition?.labelRequired) {
       labelControl.setValidators(Validators.required);
     } else {
@@ -219,7 +331,9 @@ export class PipelineCreationComponent implements OnInit {
       type: ['select', Validators.required],
       columns: [''],
       condition: [''],
-      n: [1000]
+      n: [1000],
+      inputCol: [''],
+      outputCol: ['']
     }));
   }
 
@@ -229,6 +343,12 @@ export class PipelineCreationComponent implements OnInit {
 
   stepType(index: number): string {
     return this.steps.at(index).get('type')!.value;
+  }
+
+  /** True for steps that map one column onto another (StringIndexer, OneHotEncoder). */
+  isColumnTransformer(index: number): boolean {
+    const type = this.stepType(index);
+    return type === 'string_indexer' || type === 'one_hot_encoder';
   }
 
   /* ------------------------------------------------------------------ *
@@ -258,11 +378,7 @@ export class PipelineCreationComponent implements OnInit {
         options: {}
       },
       steps: [],
-      algorithm: {
-        name: form.algorithm,
-        features: this.splitColumns(form.features),
-        params: { ...form.params }
-      }
+      stages: []
     };
 
     // Reader options only make sense for text-based formats
@@ -270,7 +386,7 @@ export class PipelineCreationComponent implements OnInit {
       spec.input.options = { header: form.header, inferSchema: form.inferSchema };
     }
 
-    // Transformation steps, keeping only the field each type actually uses
+    // Transformation steps, keeping only the fields each type actually uses
     for (const step of form.steps) {
       if (step.type === 'select') {
         spec.steps.push({ type: 'select', columns: this.splitColumns(step.columns) });
@@ -280,12 +396,27 @@ export class PipelineCreationComponent implements OnInit {
         spec.steps.push({ type: 'dropna' });
       } else if (step.type === 'limit') {
         spec.steps.push({ type: 'limit', n: Number(step.n) });
+      } else if (step.type === 'string_indexer' || step.type === 'one_hot_encoder') {
+        spec.steps.push({ type: step.type, inputCol: step.inputCol, outputCol: step.outputCol });
       }
     }
 
-    if (this.labelRequired) {
-      spec.algorithm.label = form.label;
-    }
+    // Algorithm stages, in the order the user arranged them
+    form.stages.forEach((stage: any) => {
+      const definition = this.definitionOf(stage.algorithm);
+      const entry: any = {
+        name: stage.algorithm,
+        features: this.splitColumns(stage.features),
+        params: { ...stage.params }
+      };
+      if (definition?.labelRequired) {
+        entry.label = stage.label;
+      }
+      if (stage.scaler) {
+        entry.scaler = stage.scaler;
+      }
+      spec.stages.push(entry);
+    });
 
     // Output is optional: with no path the generated program just shows the result
     if (form.outputPath) {

@@ -1439,3 +1439,141 @@ if result.stdout == '':
 Το μόνο στάδιο που δεν έχει επαληθευτεί είναι η δρομολόγηση σε Kubernetes cluster, η
 οποία διαφέρει αποκλειστικά ως προς την τιμή της επιλογής `master` και απαιτεί πρόσβαση
 στο δίκτυο του ιδρύματος (εγγραφή [011]).
+
+---
+
+## [018] 2026-08-03 — Πολλαπλά στάδια, μετασχηματισμοί χαρακτηριστικών, ομαδοποίηση αλγορίθμων
+
+**Τύπος:** Νέα λειτουργία
+**Αρχεία:** `backend/SparkProgramGenerator.py`,
+`frontend/.../pipeline-creation.component.{ts,html,css}`
+
+### Αιτία
+
+Τρεις νέες απαιτήσεις από τον επιβλέποντα:
+
+1. Δεύτερη λίστα αλγορίθμων, ώστε ο δεύτερος να λαμβάνει ως είσοδο την έξοδο του πρώτου.
+2. Min-max scaling και άλλοι μετασχηματισμοί.
+3. Διαχωρισμός των αλγορίθμων ανά κατηγορία (clustering, classification, regression).
+
+### Απαίτηση 1 — Αλυσίδωση σταδίων
+
+**Αλλαγή στην προδιαγραφή.** Το πεδίο `algorithm` (ένα αντικείμενο) αντικαταστάθηκε από
+`stages` (λίστα αντικειμένων). Η συνάρτηση `_stages_of()` δέχεται και τις δύο μορφές, ώστε
+προδιαγραφές παλαιότερου τύπου να εξακολουθούν να λειτουργούν ως pipeline ενός σταδίου.
+
+**Απομόνωση στηλών.** Κάθε στάδιο μετασχηματίζει το DataFrame και προσθέτει δικές του
+στήλες. Για να μη συγκρούονται, το στάδιο N γράφει σε `features_N` και `prediction_N`, και
+για τους ταξινομητές επιπλέον σε `raw_prediction_N` και `probability_N`. Χωρίς αυτό, δύο
+ταξινομητές θα προσπαθούσαν και οι δύο να γράψουν σε στήλη `prediction`.
+
+**Πώς επιτυγχάνεται η αλυσίδωση.** Επειδή κάθε στάδιο ενεργεί πάνω στο ίδιο DataFrame
+(`data`), το στάδιο 2 βλέπει όλες τις στήλες που παρήγαγε το στάδιο 1 και μπορεί να
+δηλώσει το `prediction_1` ανάμεσα στα δικά του χαρακτηριστικά.
+
+Παράδειγμα παραγόμενου κώδικα:
+
+```python
+# --- stage 1: kmeans ---
+assembler_1 = VectorAssembler(inputCols=['age', 'income'], outputCol='features_1_raw')
+data = assembler_1.transform(data)
+scaler_1 = MinMaxScaler(inputCol='features_1_raw', outputCol='features_1')
+data = scaler_1.fit(data).transform(data)
+estimator_1 = KMeans(featuresCol='features_1', predictionCol='prediction_1', k=2, maxIter=20, seed=1)
+model_1 = estimator_1.fit(data)
+data = model_1.transform(data)
+
+# --- stage 2: random_forest ---
+assembler_2 = VectorAssembler(inputCols=['age', 'income', 'prediction_1'], outputCol='features_2')
+data = assembler_2.transform(data)
+estimator_2 = RandomForestClassifier(featuresCol='features_2', labelCol='churned',
+                                     predictionCol='prediction_2', rawPredictionCol='raw_prediction_2',
+                                     probabilityCol='probability_2', numTrees=20, maxDepth=5, seed=1)
+model_2 = estimator_2.fit(data)
+data = model_2.transform(data)
+```
+
+**Στο frontend** τα στάδια υλοποιούνται ως `FormArray`, με κουμπί προσθήκης και αφαίρεσης
+ανά στάδιο. Το πρώτο στάδιο δεν αφαιρείται. Κάθε στάδιο εμφανίζει υπόδειξη με τις στήλες
+που έχουν παραγάγει τα προηγούμενα.
+
+### Απαίτηση 2 — Μετασχηματισμοί χαρακτηριστικών
+
+Προστέθηκαν σε δύο επίπεδα, ανάλογα με το πού ανήκουν εννοιολογικά.
+
+**Κλιμάκωση, ανά στάδιο.** Νέος κατάλογος `SCALERS` με `MinMaxScaler` και
+`StandardScaler`. Επιλέγεται από πεδίο *Feature scaling* μέσα στο κάθε στάδιο και
+εφαρμόζεται στο συγκεντρωμένο διάνυσμα χαρακτηριστικών, ανάμεσα στον `VectorAssembler` και
+τον αλγόριθμο. Όταν υπάρχει κλιμάκωση, ο assembler γράφει σε `features_N_raw` και ο
+scaler παράγει το `features_N`.
+
+**Κωδικοποίηση, ως βήματα.** Νέος κατάλογος `COLUMN_TRANSFORMERS` με `StringIndexer` και
+`OneHotEncoder`. Προστέθηκαν ως νέοι τύποι στη λίστα μετασχηματισμών, με πεδία
+`inputCol` και `outputCol`. Ενεργούν σε επίπεδο στήλης, πριν συγκεντρωθεί οποιοδήποτε
+διάνυσμα — γι' αυτό ανήκουν εκεί και όχι στο στάδιο.
+
+Και οι δύο κατηγορίες είναι Estimators του Spark, δηλαδή μαθαίνουν πρώτα από τα δεδομένα:
+ο παραγόμενος κώδικας καλεί `.fit(...).transform(...)` και όχι σκέτο `.transform(...)`.
+
+### Απαίτηση 3 — Κατηγοριοποίηση
+
+Στο πεδίο κάθε ορισμού αλγορίθμου προστέθηκε `category`. Ο πίνακας `CATEGORIES` ορίζει τη
+σειρά και τα εμφανιζόμενα ονόματα. Στη φόρμα η λίστα χρησιμοποιεί `mat-optgroup`, οπότε οι
+αλγόριθμοι εμφανίζονται ομαδοποιημένοι με επικεφαλίδες.
+
+### Επέκταση του καταλόγου αλγορίθμων
+
+Με την ευκαιρία της κατηγοριοποίησης, ο κατάλογος επεκτάθηκε από τέσσερις σε οκτώ:
+
+| Κατηγορία | Αλγόριθμοι |
+|-----------|------------|
+| Clustering | K-Means, Bisecting K-Means, Gaussian Mixture |
+| Classification | Logistic Regression, Decision Tree, Random Forest |
+| Regression | Linear Regression, Decision Tree Regressor |
+
+Η επέκταση απαίτησε μόνο νέες εγγραφές στα δύο dictionary (backend και frontend), χωρίς
+καμία αλλαγή στη λογική παραγωγής — επιβεβαιώνοντας τη σχεδιαστική επιλογή της εγγραφής
+[002].
+
+### Νέο πεδίο στους ορισμούς: `prediction_cols`
+
+Κάθε αλγόριθμος δηλώνει ποιες παράμετροι εξόδου του χρειάζονται μοναδικό όνομα ανά
+στάδιο. Οι ταξινομητές δηλώνουν τρεις (`predictionCol`, `rawPredictionCol`,
+`probabilityCol`), οι υπόλοιποι μία. Χωρίς αυτό, δύο ταξινομητές στο ίδιο pipeline θα
+συγκρούονταν στις στήλες `rawPrediction` και `probability`.
+
+### Δυναμικές εισαγωγές
+
+Η συνάρτηση `_imports()` συγκεντρώνει τις απαιτούμενες γραμμές `import` από όλα τα
+στάδια και βήματα, χωρίς επαναλήψεις. Το παραγόμενο πρόγραμμα εισάγει μόνο ό,τι
+πραγματικά χρησιμοποιεί.
+
+### Έλεγχος
+
+**Generator.** Δοκιμάστηκε με pipeline δύο σταδίων (K-Means με min-max scaling, και στη
+συνέχεια Random Forest που χρησιμοποιεί το `prediction_1` ως χαρακτηριστικό), με
+pipeline που περιλαμβάνει `StringIndexer` και `OneHotEncoder`, και με προδιαγραφή
+παλαιού τύπου (`algorithm` αντί για `stages`). Σε όλες τις περιπτώσεις ο παραγόμενος
+κώδικας μεταγλωττίζεται.
+
+Έξι άκυρες περιπτώσεις εντοπίστηκαν σωστά:
+
+| Σενάριο | Μήνυμα |
+|---------|--------|
+| Καθόλου στάδια | `stages: at least one algorithm stage is required` |
+| Άγνωστος αλγόριθμος | `stages[0].name: 'svm' is not one of [...]` |
+| Άγνωστος scaler | `stages[0].scaler: 'robust' is not one of ['minmax', 'standard']` |
+| Απουσία ετικέτας | `stages[0].label: is required for random_forest` |
+| `StringIndexer` χωρίς `outputCol` | `steps[0].outputCol: is required for string_indexer` |
+| Παράμετρος άλλου αλγορίθμου | `stages[0].params.numTrees: not supported by kmeans` |
+
+**Endpoints.** Το `/preview_program` επιστρέφει σωστά τον διψήφιο κώδικα, το `/pipeline`
+γράφει το αρχείο και καταχωρεί job με `master = local[*]`, και άκυρη προδιαγραφή
+απορρίπτεται με `400`.
+
+**Frontend.** `ngc -p tsconfig.app.json --noEmit` → 0 σφάλματα (26 δευτερόλεπτα), με
+`strictTemplates` ενεργό.
+
+### Κατάσταση
+
+Ολοκληρωμένο και ελεγμένο στατικά. Εκκρεμεί rebuild και δοκιμή στον browser.
