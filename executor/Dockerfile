@@ -40,9 +40,11 @@ RUN KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" && \
 COPY ./* .
 RUN python3 -m pip install --no-cache-dir -r requirements2.txt
 
-# Sample dataset, so a pipeline can be run and demonstrated without needing
-# any external storage. Referenced from the UI as /data/customers.csv
-RUN mkdir -p /data && cp sample_customers.csv /data/customers.csv
+# Sample datasets, so a pipeline can be run and demonstrated without needing
+# any external storage: /data/customers.csv (numeric) and /data/reviews.csv
+# (text, for TF-IDF / Word2Vec). On start-up the executor also copies them into
+# the shared folder (/mnt/shared/data/), where Kubernetes pods can read them.
+RUN mkdir -p /data && cp sample_customers.csv /data/customers.csv && cp sample_reviews.csv /data/reviews.csv
 
 # Write the cluster configuration where kubectl actually looks for it (~/.kube/config)
 RUN mkdir -p /root/.kube && bash ./kubectl_config.sh && kubectl config get-contexts

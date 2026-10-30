@@ -1629,3 +1629,429 @@ Random Forest με χαρακτηριστικά `age, income, prediction_1` κα
 δείκτης. Ο διαχωρισμός train/test και οι μετρικές αξιολόγησης παραμένουν εκτός
 υλοποίησης — το σύστημα αποδεικνύει την **ορθή κατασκευή και εκτέλεση** του pipeline, όχι
 την εγκυρότητα του παραγόμενου μοντέλου.
+
+---
+
+## [020] 2026-10-20 — `docker-compose.yml` — Πρόσβαση του executor στο τοπικό Kubernetes
+
+**Τύπος:** Τροποποίηση υπάρχοντος αρχείου (καταγράφεται εκ των υστέρων· η αλλαγή έγινε κατά
+τις δοκιμές με το `pi.py`, πριν από τις εγγραφές [021]–[026])
+**Αρχείο:** `docker-compose.yml`, υπηρεσία `kubernetes-executor`
+
+### Αιτία
+
+Η απόφαση ήταν να τρέχουν οι εργασίες τοπικά, στο Kubernetes του Docker Desktop. Ο executor
+όμως δεν μπορούσε να επικοινωνήσει με τον API server του cluster: το όνομα
+`kubernetes.docker.internal` δεν επιλυόταν μέσα στο container, και το kubeconfig που
+δημιουργεί το `kubectl_config.sh` κατά το build δείχνει στο cluster του εργαστηρίου.
+
+### Μετά
+
+```yaml
+    extra_hosts:
+      - "kubernetes.docker.internal:host-gateway"
+    volumes:
+      - uploads_vol:/KubernetesAPI/backend/uploads
+      - C:\Users\andre\.kube\config:/root/.kube/config:ro
+```
+
+### Αιτιολόγηση
+
+| # | Αλλαγή | Σκοπός |
+|---|--------|--------|
+| 1 | `extra_hosts` | Το `kubernetes.docker.internal` αντιστοιχίζεται στον υπολογιστή που φιλοξενεί το Docker, όπου ακούει ο API server (θύρα 6443). |
+| 2 | Mount του `~/.kube/config` | Ο executor (`spark-submit` και `kubectl`) χρησιμοποιεί το kubeconfig που δημιούργησε το Docker Desktop. Το mount είναι `:ro` και επισκιάζει, χωρίς να το διαγράφει, το αρχείο που γράφεται κατά το build. |
+
+Η υποβολή επαληθεύτηκε με το `pi.py`: το driver pod και το executor pod ολοκληρώθηκαν.
+
+---
+
+## [021] 2026-10-20 — Κοινός φάκελος (hostPath) για τα pipelines
+
+**Τύπος:** Τροποποίηση υπαρχόντων αρχείων
+**Αρχεία:** `docker-compose.yml`, `backend/app.py`, `executor/JobExecutor.py`, `executor/Dockerfile`,
+νέο `executor/sample_reviews.csv`
+
+### Αιτία
+
+Στη λειτουργία cluster ο driver και οι executors τρέχουν ως pods, που δεν βλέπουν τα
+αρχεία των containers. Το παραγόμενο πρόγραμμα ήταν αποθηκευμένο στο named volume
+`uploads_vol` και τα δεδομένα δείγματος στο `/data` της εικόνας του executor, οπότε ένα
+pod δεν μπορούσε να βρει ούτε το ένα ούτε το άλλο. Ως τώρα μπορούσε να τρέξει σε pods μόνο
+το `pi.py`, που υπάρχει ήδη μέσα στην εικόνα του Spark.
+
+### Λύση
+
+Ένας φάκελος των Windows, `C:\Users\andre\spark-shared`, φαίνεται **στην ίδια διαδρομή**
+(`/mnt/shared`) από όλους:
+
+| Ποιος | Πώς |
+|-------|-----|
+| container `api` | bind mount στο `docker-compose.yml` |
+| container `executor` | bind mount στο `docker-compose.yml` |
+| driver pod, executor pods | volume `hostPath`, μέσω των ρυθμίσεων `spark.kubernetes.{driver,executor}.volumes.hostPath.shared.*` |
+
+Το Docker Desktop εκθέτει τον δίσκο `C:` στον κόμβο του Kubernetes ως
+`/run/desktop/mnt/host/c`, γι' αυτό η διαδρομή του hostPath είναι
+`/run/desktop/mnt/host/c/Users/andre/spark-shared`. Επειδή η διαδρομή είναι ίδια παντού,
+καμία διαδρομή αρχείου δεν χρειάζεται μετάφραση.
+
+Οργάνωση του φακέλου:
+
+```
+spark-shared/
+  programs/<user>/<id>-<όνομα>.py   παραγόμενα προγράμματα
+  data/customers.csv, reviews.csv   δεδομένα δείγματος (αντιγράφονται από τον executor)
+  results/<id>-<όνομα>.json         προεπισκόπηση αποτελέσματος (βλ. [025])
+```
+
+### Αλλαγές ανά αρχείο
+
+| Αρχείο | Αλλαγή |
+|--------|--------|
+| `docker-compose.yml` | Bind mount του φακέλου στο `api` και στον `executor`. Νέες μεταβλητές περιβάλλοντος στο `api`: `SHARED_DIR`, `SHARED_NODE_DIR`, `K8S_MASTER`, `K8S_NODE_HOSTNAME`, `SPARK_IMAGE`. |
+| `backend/app.py` | Τα προγράμματα γράφονται στο `programs/` του κοινού φακέλου (νέες βοηθητικές `pipeline_paths`, `results_path_for`). Στο `build_job_options`, για στόχο Kubernetes: master `k8s://https://kubernetes.docker.internal:6443` αντί για `kubernetes.default.svc` (που επιλύεται μόνο μέσα στο cluster), node selector `docker-desktop` αντί για `k8s-1` (κόμβος του cluster του εργαστηρίου), executable `local:///mnt/shared/...`, ρυθμίσεις hostPath για driver και executors, σταθερό όνομα driver pod (βλ. [024]) και `pullPolicy=IfNotPresent`. Οι τιμές διαβάζονται από το περιβάλλον, ώστε η μετάβαση στο cluster του εργαστηρίου να γίνεται χωρίς αλλαγή κώδικα. |
+| `executor/JobExecutor.py` | Νέα `prepare_shared_folder()`: κατά την εκκίνηση δημιουργεί τους υποφακέλους και αντιγράφει τα δεδομένα δείγματος, αν δεν υπάρχουν ήδη. |
+| `executor/Dockerfile`, `sample_reviews.csv` | Δεύτερο σύνολο δεδομένων δείγματος, με κείμενο (`id, text, positive`), για τους αλγορίθμους TF-IDF και Word2Vec ([023]). Πρόκειται για 16 σύντομες, επινοημένες φράσεις, που χρησιμεύουν μόνο για επίδειξη. |
+
+Η λειτουργία «Submit existing application» (ανέβασμα έτοιμου εκτελέσιμου) δεν αλλάζει
+και συνεχίζει να χρησιμοποιεί το `uploads_vol`.
+
+---
+
+## [022] 2026-10-20 — `spark-image/Dockerfile` — Εικόνα για τα pods
+
+**Τύπος:** Νέο αρχείο, και νέα υπηρεσία `spark-ml` στο `docker-compose.yml` (μόνο για build)
+
+### Αιτία
+
+Η εικόνα `apache/spark:3.5.0` περιέχει Python αλλά όχι `numpy`. Το `pyspark.ml` εισάγει
+το `numpy` ήδη από το `import`, οπότε κάθε πρόγραμμα με MLlib θα αποτύγχανε στο driver pod
+με `ModuleNotFoundError: No module named 'numpy'`. Το `pi.py` δεν χρησιμοποιεί MLlib και
+γι' αυτό δεν είχε εμφανίσει το πρόβλημα.
+
+### Λύση
+
+Μια μικρή εικόνα `spark-ml:3.5.0`: `apache/spark:3.5.0` + `numpy==1.24.4`, η ίδια έκδοση
+με τον executor ([015]). Το Kubernetes του Docker Desktop (provisioner kubeadm)
+χρησιμοποιεί τις τοπικές εικόνες του Docker, οπότε δεν χρειάζεται registry. Η εικόνα
+χτίζεται μία φορά:
+
+```
+docker compose --profile images build spark-ml
+```
+
+Η υπηρεσία έχει `profiles: ["images"]`, άρα ένα απλό `docker compose up` δεν τη χτίζει
+και δεν την ξεκινά. Η προεπιλεγμένη εικόνα της φόρμας άλλαξε από `apache/spark:3.5.0`
+σε `spark-ml:3.5.0`.
+
+---
+
+## [023] 2026-10-20 — Κατηγορία → αλγόριθμος, και κατηγορία Feature Extraction
+
+**Τύπος:** Τροποποίηση υπαρχόντων αρχείων
+**Αρχεία:** `backend/SparkProgramGenerator.py`, `frontend/.../pipeline-creation.component.{ts,html,css}`
+
+### Αιτία
+
+Οι αλγόριθμοι εμφανίζονταν σε μία λίστα, χωρισμένη σε ομάδες ([018]). Ζητήθηκαν δύο
+ξεχωριστές λίστες (πρώτα κατηγορία, μετά μόνο οι αλγόριθμοι αυτής) και μια τέταρτη
+κατηγορία, η εξαγωγή χαρακτηριστικών.
+
+### Φόρμα
+
+Κάθε στάδιο έχει πλέον δύο πεδία: **Category** (Clustering, Classification, Regression,
+Feature Extraction) και **Algorithm**, που δείχνει μόνο τους αλγορίθμους της κατηγορίας.
+Όταν αλλάζει η κατηγορία, επιλέγεται αυτόματα ο πρώτος αλγόριθμός της. Κάτω από κάθε
+στάδιο εμφανίζεται η στήλη που προσθέτει (π.χ. `pca_1`), και η υπόδειξη αλυσίδωσης
+δείχνει τη σωστή στήλη κάθε προηγούμενου σταδίου (παλιότερα έδειχνε πάντα
+`prediction_N`). Για τους αλγορίθμους κειμένου, το πεδίο γίνεται «Text Column» και η
+κανονικοποίηση κρύβεται.
+
+Μια διόρθωση στο ίδιο σημείο: οι συναρτήσεις που ξαναχτίζουν τις παραμέτρους ενός σταδίου
+δέχονταν τη **θέση** του σταδίου, όπως ήταν τη στιγμή της δημιουργίας του. Αν διαγραφόταν
+ένα προηγούμενο στάδιο, η αλλαγή αλγορίθμου ενημέρωνε λάθος στάδιο. Τώρα δέχονται το ίδιο
+το στάδιο (`FormGroup`).
+
+### Νέοι αλγόριθμοι
+
+| Τιμή | Κλάση(εις) MLlib | Είσοδος | Προσθέτει |
+|------|------------------|---------|-----------|
+| `pca` | `PCA` | αριθμητικές στήλες (assembler, προαιρετικά κανονικοποίηση) | `pca_N` |
+| `chisq_selector` | `ChiSqSelector` (απαιτεί label) | αριθμητικές στήλες | `selected_N` |
+| `tf_idf` | `Tokenizer` → `HashingTF` → `IDF` | μία στήλη κειμένου | `tfidf_N` |
+| `word2vec` | `Tokenizer` → `Word2Vec` | μία στήλη κειμένου | `w2v_N` |
+
+Οι στήλες αυτές είναι διανύσματα, οπότε ένα επόμενο στάδιο μπορεί να τις βάλει στα
+χαρακτηριστικά του (π.χ. K-Means πάνω στο `pca_1`).
+
+### Generator
+
+- Ο κατάλογος `ALGORITHMS` απέκτησε τα πεδία `input` (`vector`/`text`), `input_param` και
+  `output_col` για τους νέους αλγορίθμους.
+- Η `_stage_lines` χωρίστηκε σε `_vector_input_lines` (assembler + κανονικοποίηση, όπως
+  πριν) και `_text_stage_lines` (tokenizer κ.λπ.).
+- Νέοι έλεγχοι: οι αλγόριθμοι κειμένου δέχονται **ακριβώς μία** στήλη και καμία
+  κανονικοποίηση.
+- Κατά την εγγραφή του αποτελέσματος, οι βοηθητικές στήλες (λέξεις, συχνότητες, διανύσματα
+  εισόδου) αφαιρούνται, όπως και πριν. Οι εξαγόμενες στήλες **κρατιούνται** και
+  μετατρέπονται σε πίνακες αριθμών (σε CSV, σε κείμενο `"[0.1, 0.2]"`). Η μετατροπή γίνεται
+  με ένα μικρό UDF και όχι με το `pyspark.ml.functions.vector_to_array`: το import εκείνου
+  του module απαιτεί `pandas`, που δεν υπάρχει στις εικόνες. Αυτό διαπιστώθηκε κατά τη
+  δοκιμή ([026]).
+
+---
+
+## [024] 2026-10-20 — `executor/JobExecutor.py` — Επιτυχία, αποτυχία και log ενός job
+
+**Τύπος:** Τροποποίηση υπάρχοντος αρχείου
+
+### Αιτία
+
+1. Ο executor θεωρούσε ότι ένα job πέτυχε όταν το `spark-submit` είχε γράψει κάτι στο
+   stdout. Στη λειτουργία cluster το `spark-submit` γράφει μόνο στο stderr, οπότε ένα job
+   που ολοκληρωνόταν κανονικά θα σημειωνόταν ως αποτυχημένο.
+2. Αποθηκευόταν μόνο το stdout του `spark-submit`. Στη λειτουργία cluster, η έξοδος του
+   προγράμματος βρίσκεται στο log του driver pod, γι' αυτό και ως τώρα τη διαβάζαμε από το
+   cmd με `kubectl logs`.
+
+### Λύση
+
+- Για τα jobs Kubernetes που έχουν σταθερό όνομα driver pod
+  (`spark.kubernetes.driver.pod.name`, [021]):
+  - πριν από την υποβολή διαγράφεται τυχόν pod με το ίδιο όνομα από προηγούμενη απόπειρα·
+  - μετά την υποβολή, η επιτυχία κρίνεται από τη φάση του pod (`Succeeded`)·
+  - ως log αποθηκεύεται το `kubectl logs` του driver pod, και σε αποτυχία προστίθεται και η
+    έξοδος του `spark-submit`.
+- Για τις τοπικές εκτελέσεις, η επιτυχία κρίνεται από τον κωδικό εξόδου του `spark-submit`,
+  και σε αποτυχία το log συμπληρώνεται με το stderr.
+- Τα logs περικόπτονται στους τελευταίους 200.000 χαρακτήρες, λόγω του ορίου 16 MB ανά
+  έγγραφο της MongoDB.
+- Η `job_executor` επιστρέφει πλέον `True`/`False` αντί για το κείμενο
+  `"Subprocess didn't run"`.
+
+Τα jobs της λειτουργίας «Submit existing application» δεν έχουν σταθερό όνομα pod και
+κρίνονται από τον κωδικό εξόδου.
+
+---
+
+## [025] 2026-10-20 — Κουμπί αποτελεσμάτων στα ολοκληρωμένα jobs
+
+**Τύπος:** Τροποποίηση υπαρχόντων αρχείων και νέο component
+**Αρχεία:** `backend/SparkProgramGenerator.py`, `backend/app.py`, `backend/DatabaseConnection.py`,
+`frontend/.../interfaces.ts`, `user-menu`, `admin-menu`, νέο `components/results-dialog`
+
+### Αιτία
+
+Για να δούμε το αποτέλεσμα ενός pipeline, έπρεπε να διαβάσουμε την έξοδο του `show()` από
+το cmd (`docker logs executor` ή `kubectl logs`).
+
+### Λύση
+
+1. **Το πρόγραμμα γράφει μια προεπισκόπηση.** Όταν δίνεται `results_path`, το παραγόμενο
+   πρόγραμμα αποθηκεύει στο τέλος τις πρώτες 50 γραμμές του τελικού DataFrame, μαζί με το
+   πλήθος όλων των γραμμών, ως JSON στο `/mnt/shared/results/<id>-<όνομα>.json`. Τα
+   διανύσματα γίνονται πίνακες αριθμών· τα μεγάλα αραιά διανύσματα (π.χ. TF-IDF με 1024
+   θέσεις) αποθηκεύονται μόνο με τις μη μηδενικές θέσεις τους. Το αρχείο γράφεται πρώτα
+   με προσωρινό όνομα και μετονομάζεται, ώστε να μη διαβαστεί ποτέ μισό.
+2. **Νέο endpoint `GET /job-results/<job_id>`** (με `@authentication_required`): επιστρέφει
+   την προεπισκόπηση, αν υπάρχει, και το πιο πρόσφατο log του job από τη συλλογή `Logs`
+   (νέα `retrieve_latest_log`). Η διαδρομή του JSON προκύπτει από το executable του job,
+   και διαβάζονται μόνο αρχεία μέσα στο `results/` του κοινού φακέλου.
+3. **UI:** στη στήλη Status των πινάκων χρήστη και διαχειριστή εμφανίζεται κουμπί για τα
+   jobs `finished` (πίνακας) και `failed` (log). Ανοίγει παράθυρο με δύο όψεις, **Result**
+   (πίνακας) και **Log**.
+
+Το παράθυρο χρησιμοποιεί μόνο components που ήδη υπήρχαν στο bundle, χωρίς tabs ή
+spinner, γιατί η production build του frontend ήταν ήδη στα 998 kB, πολύ κοντά στο όριο
+του 1 MB (`angular.json` → `budgets`). Με την πρώτη εκδοχή (με `MatTabs`) έφτανε τα
+1,03 MB και η build αποτύγχανε. Η τελική είναι 1005 kB, εντός ορίου.
+
+---
+
+## [026] 2026-10-20 — Επαλήθευση των [021]–[025] εκτός Docker
+
+**Τύπος:** Έλεγχος λειτουργίας (καμία αλλαγή κώδικα)
+
+Οι δοκιμές έγιναν σε ξεχωριστό περιβάλλον, με PySpark 3.5.0 και numpy 1.24.4 όπως στις
+εικόνες, όχι στο Docker Desktop.
+
+| Έλεγχος | Αποτέλεσμα |
+|---------|-----------|
+| Πέντε pipelines παρήχθησαν και εκτελέστηκαν πραγματικά με Spark: K-Means → Random Forest, PCA (standard) → K-Means στο `pca_1`, Chi-Squared → Logistic Regression στο `selected_1`, TF-IDF → Logistic Regression (έξοδος Parquet), Word2Vec → K-Means (έξοδος CSV) | Όλα ολοκληρώθηκαν (exit 0) και έγραψαν σωστό JSON προεπισκόπησης |
+| Έξοδος CSV με εξαγόμενα διανύσματα | Γράφτηκαν ως `"[0.031, -0.016, …]"` |
+| Μη έγκυρες προδιαγραφές (δύο στήλες κειμένου, κανονικοποίηση σε κείμενο, Chi-Squared χωρίς label) | Απορρίφθηκαν με σαφές μήνυμα |
+| `build_job_options` + `SparkCommandGenerator` για Kubernetes | Σωστή εντολή `spark-submit` (master, hostPath για driver και executors, όνομα pod, `local://` executable) |
+| `/job-results/<id>` (Flask test client) | Επιστρέφει προεπισκόπηση και log· 404 για άγνωστο job· δεν διαβάζει αρχεία εκτός `results/` |
+| Λογική επιτυχίας του executor, με προσομοιωμένα `kubectl`/`spark-submit` | `Succeeded` → finished, `Failed` ή pod που δεν δημιουργήθηκε → failed με log |
+| Production build του frontend | Επιτυχής, 1005 kB |
+
+**Δεν έχει δοκιμαστεί ακόμα:** η εκτέλεση στο ίδιο το Docker Desktop, δηλαδή το hostPath σε
+πραγματικά pods, η εγγραφή του JSON από τον χρήστη `spark` (uid 185) στον φάκελο των
+Windows και το `kubectl logs` μέσα από τον executor. Αυτό είναι το επόμενο βήμα.
+
+---
+
+## [027] 2026-10-21 — Πρώτη εκτέλεση σε pods: δικαιώματα εγγραφής στον κοινό φάκελο
+
+**Τύπος:** Τροποποίηση των `spark-image/Dockerfile` και `backend/SparkProgramGenerator.py`
+
+### Αποτέλεσμα της δοκιμής
+
+Δύο εκτελέσεις του pipeline `test-kmeans` (K-Means, `age, income`, Min-Max, k = 2) στο
+Kubernetes του Docker Desktop:
+
+1. **Πρώτη:** απέτυχε με `PATH_NOT_FOUND`, επειδή η διαδρομή εισόδου γράφτηκε στη φόρμα
+   χωρίς την αρχική `/` (`mnt/shared/...`) και το Spark την έψαξε σχετικά με τον φάκελο
+   εργασίας του pod. Δεν πρόκειται για σφάλμα του κώδικα.
+2. **Δεύτερη** (με `/mnt/shared/data/customers.csv`): ο υπολογισμός ολοκληρώθηκε. Το driver
+   pod και το executor pod σηκώθηκαν με την εικόνα `spark-ml:3.5.0`, το volume `shared`
+   (hostPath) προσαρτήθηκε, και το πρόγραμμα και τα δεδομένα διαβάστηκαν από αυτό. Στο
+   τέλος όμως ο driver απέτυχε:
+
+```
+PermissionError: [Errno 13] Permission denied: '/mnt/shared/results/34335cc0f0c4-test-kmeans.json.tmp'
+```
+
+Επιβεβαιώνονται τα [021], [022] και [024]: το hostPath λειτουργεί για ανάγνωση, η εικόνα
+έχει numpy, και ο executor αναγνώρισε σωστά την αποτυχία και αποθήκευσε το log του pod.
+
+### Αιτία
+
+Η εικόνα `apache/spark` τρέχει ως χρήστης `spark` (uid 185). Ο φάκελος των Windows φαίνεται
+στον κόμβο του Kubernetes ως ιδιοκτησία του root, οπότε ο uid 185 μπορεί να διαβάσει αλλά
+όχι να γράψει. Το ίδιο θα συνέβαινε και με ένα output path μέσα στο `/mnt/shared`.
+
+### Αλλαγές
+
+| Αρχείο | Αλλαγή | Σκοπός |
+|--------|--------|--------|
+| `spark-image/Dockerfile` | Αφαίρεση της τελικής `USER spark`: τα pods τρέχουν ως root | Δικαίωμα εγγραφής στον κοινό φάκελο. Αποδεκτό για το τοπικό cluster δοκιμών. Σε κανονικό cluster, ο φάκελος του hostPath πρέπει να γίνει εγγράψιμος για τον uid 185. |
+| `backend/SparkProgramGenerator.py` | Η κλήση `save_preview` μπήκε σε `try/except OSError`, που τυπώνει προειδοποίηση | Αν η προεπισκόπηση δεν μπορεί να γραφτεί, το pipeline δεν πρέπει να σημειώνεται ως αποτυχημένο, αφού η πραγματική δουλειά του έχει ήδη γίνει. |
+
+Χρειάζεται νέο build της εικόνας: `docker compose --profile images build spark-ml`.
+
+---
+
+## [028] 2026-10-21 — Παράθυρο αποτελεσμάτων: φιλτράρισμα του log
+
+**Τύπος:** Τροποποίηση του `frontend/src/app/components/results-dialog/results-dialog.component.{ts,html}`
+
+### Αιτία
+
+Μετά το [027] το job `test-kmeans` ολοκληρώθηκε (`finished`). Το παράθυρο όμως άνοιξε στο
+log, γιατί δεν βρέθηκε αρχείο προεπισκόπησης: ο φάκελος `spark-shared/results/` ήταν άδειος,
+άρα η εγγραφή απέτυχε ξανά και πιάστηκε από το `try/except` του [027]. Ο πίνακας του `show()`
+υπήρχε μέσα στο log, αλλά χαμένος ανάμεσα σε εκατοντάδες γραμμές `INFO` του Spark.
+
+### Αλλαγή
+
+Η όψη Log δείχνει πλέον, από προεπιλογή, μόνο την **έξοδο του προγράμματος**: αφαιρούνται οι
+γραμμές `INFO`/`WARN`/`DEBUG`/`TRACE` του Spark (μορφή `yy/MM/dd HH:mm:ss LEVEL ...`), μαζί
+με τις εσοχές που τις συνεχίζουν, όπως τα μπλοκ κατάστασης του pod. Μένουν ο πίνακας του
+`show()`, οι προειδοποιήσεις του προγράμματος και τα Python tracebacks. Ένα κουμπί
+εναλλάσσει την προβολή στο πλήρες log.
+
+Η αιτία της αποτυχίας εγγραφής διερευνάται ακόμα: είτε η εικόνα `spark-ml:3.5.0` δεν
+ξαναχτίστηκε μετά το [027], είτε η εγγραφή αποτυγχάνει ακόμα και ως root.
+
+---
+
+## [029] 2026-10-21 — Η προεπισκόπηση γράφεται από τον executor, όχι από το driver pod
+
+**Τύπος:** Τροποποίηση των `backend/SparkProgramGenerator.py`, `backend/app.py` και `executor/JobExecutor.py`
+
+### Αιτία
+
+Η εικόνα `spark-ml:3.5.0` είχε ξαναχτιστεί (`docker image inspect` → `User: root`). Παρ' όλα
+αυτά, το driver pod εξακολουθούσε να μην μπορεί να γράψει στο `spark-shared/results/`. Άρα η
+αλλαγή χρήστη του [027] δεν αρκεί. Η πιθανότερη εξήγηση, που δεν έχει ακόμα επιβεβαιωθεί,
+είναι ότι το entrypoint της εικόνας `apache/spark` γυρίζει στον χρήστη `spark` ακόμα κι όταν
+το container ξεκινά ως root. Ο container `executor`, αντίθετα, γράφει κανονικά στον ίδιο
+φάκελο: δημιούργησε τους υποφακέλους και αντέγραψε εκεί τα δεδομένα δείγματος.
+
+### Λύση
+
+Το driver pod δεν γράφει πλέον κανένα αρχείο:
+
+1. **Generator:** η `save_preview(data, path)` αντικαταστάθηκε από την `print_preview(data)`,
+   που τυπώνει την προεπισκόπηση ως μία γραμμή JSON ανάμεσα σε δύο γραμμές-σημάδια
+   (`=====SPARK-GUI-PREVIEW-BEGIN=====` / `...-END=====`). Η παράμετρος
+   `generate_program(..., results_path=...)` έγινε `preview=True`. Το `try/except` του [027]
+   αφαιρέθηκε, αφού η εκτύπωση δεν μπορεί να αποτύχει λόγω δικαιωμάτων.
+2. **Executor:** νέες `results_path_of` και `store_preview`. Μετά την εκτέλεση, ο executor βρίσκει
+   το JSON στο log (στο `kubectl logs` του driver ή, στις τοπικές εκτελέσεις, στο stdout),
+   ελέγχει ότι είναι έγκυρο, το γράφει στο `/mnt/shared/results/<id>-<όνομα>.json` και το
+   αφαιρεί από το log που αποθηκεύεται, αφήνοντας μια σύντομη σημείωση στη θέση του.
+   Γράφει μόνο για προγράμματα που βρίσκονται μέσα στο `/mnt/shared/programs/`.
+3. Το endpoint `/job-results` και το UI δεν αλλάζουν: διαβάζουν το ίδιο αρχείο από την ίδια θέση.
+
+### Επαλήθευση (εκτός Docker)
+
+Pipeline TF-IDF → Logistic Regression πάνω στο `reviews.csv`, που παρήχθη, εκτελέστηκε με
+Spark 3.5.0 και πέρασε από την πραγματική `job_executor` (με προσομοιωμένη βάση): το job
+βγήκε επιτυχημένο, το JSON γράφτηκε (16 από 16 γραμμές) και τα σημάδια δεν υπάρχουν στο
+αποθηκευμένο log.
+
+### Ανοιχτό ζήτημα
+
+Το ίδιο πρόβλημα δικαιωμάτων αφορά και ένα **Output Path** μέσα στο `/mnt/shared`, γιατί εκεί
+γράφει το ίδιο το Spark, από τον driver και τους executors. Μέχρι να λυθεί, το Output Path
+πρέπει να μένει κενό στις εκτελέσεις σε Kubernetes. Η αλλαγή χρήστη στο `spark-image/Dockerfile`
+([027]) διατηρείται μέχρι να επιβεβαιωθεί η αιτία.
+
+---
+
+## [030] 2026-10-21 — Έλεγχος ότι οι διαδρομές δεδομένων είναι απόλυτες
+
+**Τύπος:** Τροποποίηση του `backend/SparkProgramGenerator.py` (`validate_spec`)
+
+### Αιτία
+
+Το pipeline `test-pca-chain` (Filter → PCA → K-Means → Decision Tree) απέτυχε για τον ίδιο
+λόγο με την πρώτη δοκιμή του [027]: η διαδρομή εισόδου γράφτηκε χωρίς την αρχική `/`
+(`mnt/shared/data/customers.csv`). Το Spark τη διάβασε ως σχετική ως προς τον φάκελο εργασίας
+του pod και απέτυχε με `PATH_NOT_FOUND`, αφού όμως το job είχε ήδη υποβληθεί στο cluster.
+Το ίδιο το πρόγραμμα, εκτελεσμένο με σωστή διαδρομή εκτός Docker, ολοκληρώνεται κανονικά.
+
+### Αλλαγή
+
+Νέα `_validate_path`: τα `input.path` και `output.path` πρέπει να είναι απόλυτες διαδρομές
+(να αρχίζουν με `/`) ή URI με σχήμα (π.χ. `s3a://`, `hdfs://`). Διαφορετικά, η προδιαγραφή
+απορρίπτεται πριν από οποιαδήποτε υποβολή, με μήνυμα που προτείνει τη σωστή μορφή:
+
+```
+input.path: 'mnt/shared/data/customers.csv' is not an absolute path - did you mean '/mnt/shared/data/customers.csv'?
+```
+
+Το μήνυμα εμφανίζεται στη φόρμα, τόσο στο «Preview» όσο και στο «Create pipeline».
+
+---
+
+## [031] 2026-10-21 — Έλεγχοι εισόδου πριν από την υποβολή
+
+**Τύπος:** Τροποποίηση των `backend/app.py` και `backend/SparkProgramGenerator.py`
+
+### Αιτία
+
+Το pipeline `test-chisq` (Drop nulls → Chi-Squared → Random Forest → Linear Regression)
+απέτυχε στο cluster. Το πρόγραμμα ήταν σωστό, αλλά:
+
+1. η διαδρομή εισόδου ήταν `/mn/shared/data/customers.csv` (λείπει το `t`). Είναι απόλυτη,
+   οπότε πέρασε τον έλεγχο του [030], αλλά δεν υπάρχει·
+2. το στάδιο Linear Regression είχε ετικέτα `income` και στα χαρακτηριστικά του `age, income`.
+   Αυτό δεν προκαλεί σφάλμα, αλλά το μοντέλο απλώς αντιγράφει την απάντηση από την είσοδό του.
+
+### Αλλαγές
+
+| Αρχείο | Έλεγχος | Μήνυμα |
+|--------|---------|--------|
+| `app.py` (νέα `missing_shared_input`) | Σε εκτέλεση Kubernetes, μια τοπική διαδρομή πρέπει να βρίσκεται μέσα στο `/mnt/shared/`, τον μόνο φάκελο που βλέπουν τα pods. Τα URI (π.χ. `s3a://`) και οι τοπικές εκτελέσεις εξαιρούνται. | `... is outside the shared folder - Kubernetes pods can only read files under /mnt/shared/` |
+| `app.py` | Μια διαδρομή μέσα στο `/mnt/shared/` πρέπει να υπάρχει. Ο container `api` βλέπει τον ίδιο φάκελο. | `... does not exist in the shared folder` |
+| `SparkProgramGenerator.py` | Η στήλη ετικέτας ενός σταδίου δεν επιτρέπεται να υπάρχει και στα χαρακτηριστικά του. | `stages[N].features: must not contain the label column 'income'` |
+
+Οι έλεγχοι τρέχουν τόσο στο «Preview» όσο και στο «Create pipeline». Στο «Preview» η φόρμα
+δεν στέλνει τον στόχο εκτέλεσης, οπότε ελέγχεται μόνο η ύπαρξη του αρχείου. Δοκιμάστηκαν με
+τον test client του Flask: σωστή διαδρομή → 200, `/mn/shared/...` → 400, ανύπαρκτο αρχείο →
+400, `/data/customers.csv` σε τοπική εκτέλεση → 200, `s3a://...` → 200, ετικέτα στα
+χαρακτηριστικά → 400.

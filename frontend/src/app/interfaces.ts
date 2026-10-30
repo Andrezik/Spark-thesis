@@ -80,3 +80,19 @@ export interface NewJob {
   options: Options;
   [key: string]: any;
 }
+
+/** Response of GET /job-results/<job_id> */
+export interface JobResults {
+  status: string;
+  job_status: string;
+  name: string;
+  /** First rows of the pipeline result; null for jobs that wrote none */
+  preview: {
+    columns: string[];
+    rows: any[][];
+    total_rows: number;
+    preview_rows: number;
+  } | null;
+  log: string | null;
+  log_timestamp: string | null;
+}

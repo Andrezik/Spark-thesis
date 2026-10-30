@@ -37,8 +37,8 @@
       <h3>Input data</h3>
       <mat-form-field appearance="outline" class="full-width">
         <mat-label>Data Path</mat-label>
-        <input matInput formControlName="inputPath" placeholder="/data/customers.csv">
-        <mat-hint>Path readable by the Spark cluster</mat-hint>
+        <input matInput formControlName="inputPath" placeholder="/mnt/shared/data/customers.csv">
+        <mat-hint>Path inside the shared folder (/mnt/shared), so the Kubernetes pods can read it</mat-hint>
       </mat-form-field>
 
       <mat-form-field appearance="outline">
@@ -136,24 +136,39 @@
             </button>
           </div>
 
-          <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Algorithm</mat-label>
-            <mat-select formControlName="algorithm">
-              <mat-optgroup *ngFor="let category of categories" [label]="category.label">
-                <mat-option *ngFor="let algorithm of algorithmsOf(category.value)"
-                            [value]="algorithm.value">
+          <!-- First the category, then only the algorithms of that category -->
+          <div class="params-row">
+            <mat-form-field appearance="outline">
+              <mat-label>Category</mat-label>
+              <mat-select formControlName="category">
+                <mat-option *ngFor="let category of categories" [value]="category.value">
+                  {{category.label}}
+                </mat-option>
+              </mat-select>
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="algorithm-field">
+              <mat-label>Algorithm</mat-label>
+              <mat-select formControlName="algorithm">
+                <mat-option *ngFor="let algorithm of stageAlgorithms(i)" [value]="algorithm.value">
                   {{algorithm.label}}
                 </mat-option>
-              </mat-optgroup>
-            </mat-select>
-          </mat-form-field>
+              </mat-select>
+            </mat-form-field>
+          </div>
 
-          <mat-form-field appearance="outline" class="full-width">
+          <mat-form-field appearance="outline" class="full-width" *ngIf="!stageTextInput(i)">
             <mat-label>Feature Columns (comma separated)</mat-label>
             <input matInput formControlName="features" placeholder="age, income">
             <mat-hint *ngIf="availableFrom(i).length">
               Also available from earlier stages: {{availableFrom(i).join(', ')}}
             </mat-hint>
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="full-width" *ngIf="stageTextInput(i)">
+            <mat-label>Text Column</mat-label>
+            <input matInput formControlName="features" placeholder="text">
+            <mat-hint>One column with text; it is split into words before {{stageDefinition(i)?.label}}</mat-hint>
           </mat-form-field>
 
           <mat-form-field appearance="outline" class="full-width" *ngIf="stageLabelRequired(i)">
@@ -162,7 +177,7 @@
             <mat-hint>Required for supervised algorithms</mat-hint>
           </mat-form-field>
 
-          <mat-form-field appearance="outline" class="full-width">
+          <mat-form-field appearance="outline" class="full-width" *ngIf="!stageTextInput(i)">
             <mat-label>Feature scaling</mat-label>
             <mat-select formControlName="scaler">
               <mat-option *ngFor="let scaler of scalers" [value]="scaler.value">
@@ -178,6 +193,10 @@
               <input matInput type="number" [formControlName]="param.name">
             </mat-form-field>
           </div>
+
+          <p class="hint">
+            This stage adds the column <code>{{outputColumnOf(i)}}</code>.
+          </p>
 
         </div>
       </div>
@@ -223,8 +242,15 @@
 
       <p class="hint" *ngIf="isLocalTarget">
         The program runs with Spark inside the executor container, without a cluster.
-        A sample dataset is available at <code>/data/customers.csv</code>
-        (columns: age, income, tenure, churned).
+      </p>
+      <p class="hint" *ngIf="!isLocalTarget">
+        The program runs on the local Kubernetes cluster: the driver and the executors are
+        pods, which see the shared folder at <code>/mnt/shared</code>.
+      </p>
+      <p class="hint">
+        Sample datasets: <code>/mnt/shared/data/customers.csv</code>
+        (columns: age, income, tenure, churned) and <code>/mnt/shared/data/reviews.csv</code>
+        (columns: id, text, positive &mdash; for TF-IDF and Word2Vec).
       </p>
 
       <h3>Cluster resources</h3>

@@ -17,7 +17,8 @@ import {MatDatepickerModule} from "@angular/material/datepicker";
 import {MatNativeDateModule} from "@angular/material/core";
 import {Router} from "@angular/router";
 import {MatTabsModule} from "@angular/material/tabs";
-import {JsonPipe, NgClass, NgForOf, NgStyle} from "@angular/common";
+import {JsonPipe, NgClass, NgForOf, NgIf, NgStyle} from "@angular/common";
+import {ResultsDialogComponent} from "../../components/results-dialog/results-dialog.component";
 import {FormsModule, ReactiveFormsModule} from "@angular/forms";
 import {MatSelectModule} from "@angular/material/select";
 import {ClipboardModule} from "@angular/cdk/clipboard";
@@ -43,7 +44,7 @@ const JOB_DATA: JobElement[] = [];
     ClipboardModule, MatCheckboxModule,
     ReactiveFormsModule, MatSortModule,
     MatPaginatorModule, NgClass, JsonPipe,
-    NgForOf, MatDividerModule, MatToolbarModule,
+    NgForOf, NgIf, MatDividerModule, MatToolbarModule,
     MatTooltipModule],
   templateUrl: './user-menu.component.html',
   styleUrl: './user-menu.component.css'
@@ -186,6 +187,15 @@ export class UserMenuComponent implements OnInit, AfterViewInit{
     this.filter_input = '';
     this.dataSource.filter = '';
  }
+
+  /** Opens the result table and log of a job that has run (finished or failed). */
+  OpenResults(job_id: string, status: string) {
+    this.dialog.open(ResultsDialogComponent, {
+      data: {jobId: job_id, status: status},
+      width: '90vw',
+      maxWidth: '1200px'
+    });
+  }
 
   openDialog(message: string, mode: string) {
     const dialogRef = this.dialog.open(ConfirmDialogComponent, {

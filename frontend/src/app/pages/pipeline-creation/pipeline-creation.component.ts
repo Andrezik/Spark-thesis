@@ -29,16 +29,22 @@ interface AlgorithmParam {
  * Keeping the two in sync means the form only ever offers combinations the
  * backend can actually generate.
  */
+type CategoryValue = 'clustering' | 'classification' | 'regression' | 'feature_extraction';
+
 interface AlgorithmDefinition {
   value: string;
   label: string;
-  category: 'clustering' | 'classification' | 'regression';
+  category: CategoryValue;
   labelRequired: boolean;
+  /** 'text': exactly one text column instead of numeric feature columns (TF-IDF, Word2Vec) */
+  input?: 'vector' | 'text';
+  /** Feature extraction only: base name of the column the stage adds ('pca' -> 'pca_1') */
+  outputCol?: string;
   params: AlgorithmParam[];
 }
 
 interface AlgorithmCategory {
-  value: string;
+  value: CategoryValue;
   label: string;
 }
 
@@ -127,14 +133,63 @@ const ALGORITHMS: AlgorithmDefinition[] = [
     params: [
       { name: 'maxDepth', label: 'Max depth', default: 5 }
     ]
+  },
+  // --- feature extraction ---
+  {
+    value: 'pca',
+    label: 'PCA (Principal Component Analysis)',
+    category: 'feature_extraction',
+    labelRequired: false,
+    input: 'vector',
+    outputCol: 'pca',
+    params: [
+      { name: 'k', label: 'Number of components (k)', default: 2 }
+    ]
+  },
+  {
+    value: 'chisq_selector',
+    label: 'Chi-Squared feature selection',
+    category: 'feature_extraction',
+    labelRequired: true,
+    input: 'vector',
+    outputCol: 'selected',
+    params: [
+      { name: 'numTopFeatures', label: 'Features to keep', default: 2 }
+    ]
+  },
+  {
+    value: 'tf_idf',
+    label: 'TF-IDF (text)',
+    category: 'feature_extraction',
+    labelRequired: false,
+    input: 'text',
+    outputCol: 'tfidf',
+    params: [
+      { name: 'numFeatures', label: 'Number of hash buckets', default: 1024 },
+      { name: 'minDocFreq', label: 'Min document frequency', default: 0 }
+    ]
+  },
+  {
+    value: 'word2vec',
+    label: 'Word2Vec (text)',
+    category: 'feature_extraction',
+    labelRequired: false,
+    input: 'text',
+    outputCol: 'w2v',
+    params: [
+      { name: 'vectorSize', label: 'Vector size', default: 10 },
+      { name: 'minCount', label: 'Min word count', default: 1 },
+      { name: 'seed', label: 'Random seed', default: 1 }
+    ]
   }
 ];
 
-/** Order and display names of the groups shown in the algorithm dropdown. */
+/** Order and display names of the categories shown in the first dropdown of a stage. */
 const CATEGORIES: AlgorithmCategory[] = [
   { value: 'clustering', label: 'Clustering' },
   { value: 'classification', label: 'Classification' },
-  { value: 'regression', label: 'Regression' }
+  { value: 'regression', label: 'Regression' },
+  { value: 'feature_extraction', label: 'Feature Extraction' }
 ];
 
 const BACKEND_URL = 'http://localhost:5000';
@@ -225,7 +280,8 @@ export class PipelineCreationComponent implements OnInit {
       instances: [1, Validators.required],
       cores: [1, Validators.required],
       memory: [512, Validators.required],
-      image: ['apache/spark:3.5.0', Validators.required]
+      // apache/spark plus numpy (see spark-image/Dockerfile); pyspark.ml needs numpy
+      image: ['spark-ml:3.5.0', Validators.required]
     });
 
     // A pipeline always has at least one stage
@@ -240,9 +296,14 @@ export class PipelineCreationComponent implements OnInit {
     return this.pipelineForm.get('stages') as FormArray;
   }
 
-  /** The algorithms belonging to one category, for the grouped dropdown. */
+  /** The algorithms belonging to one category, for the second dropdown of a stage. */
   algorithmsOf(category: string): AlgorithmDefinition[] {
     return this.algorithms.filter(algorithm => algorithm.category === category);
+  }
+
+  /** The algorithms offered for a stage: only those of the category picked for it. */
+  stageAlgorithms(index: number): AlgorithmDefinition[] {
+    return this.algorithmsOf(this.stages.at(index).get('category')!.value);
   }
 
   definitionOf(algorithmValue: string): AlgorithmDefinition | undefined {
@@ -257,24 +318,41 @@ export class PipelineCreationComponent implements OnInit {
     return this.stageDefinition(index)?.labelRequired === true;
   }
 
+  /** TF-IDF and Word2Vec read one text column; they get no feature scaling. */
+  stageTextInput(index: number): boolean {
+    return this.stageDefinition(index)?.input === 'text';
+  }
+
   stageParams(index: number): FormGroup {
     return this.stages.at(index).get('params') as FormGroup;
   }
 
   /**
-   * Column names a stage can feed on: the prediction columns produced by every
-   * earlier stage. Shown as a hint so the user knows how to chain stages.
+   * The column a stage adds that a later stage can feed on: 'prediction_N' for
+   * the predicting algorithms, e.g. 'pca_N' for feature extraction. Mirrors
+   * output_column() in backend/SparkProgramGenerator.py.
+   */
+  outputColumnOf(index: number): string {
+    const definition = this.stageDefinition(index);
+    const base = definition?.category === 'feature_extraction' ? definition.outputCol : 'prediction';
+    return `${base}_${index + 1}`;
+  }
+
+  /**
+   * Column names a stage can feed on: the columns produced by every earlier
+   * stage. Shown as a hint so the user knows how to chain stages.
    */
   availableFrom(index: number): string[] {
     const columns: string[] = [];
     for (let i = 0; i < index; i++) {
-      columns.push(`prediction_${i + 1}`);
+      columns.push(this.outputColumnOf(i));
     }
     return columns;
   }
 
   addStage() {
     const group = this.fb.group({
+      category: ['clustering' as CategoryValue, Validators.required],
       algorithm: ['kmeans', Validators.required],
       features: ['', Validators.required],
       label: [''],
@@ -283,11 +361,17 @@ export class PipelineCreationComponent implements OnInit {
     });
 
     this.stages.push(group);
-    const index = this.stages.length - 1;
 
-    this.rebuildParamControls(index, 'kmeans');
+    // The stage is looked up when a value changes (not by a fixed index), so
+    // removing an earlier stage cannot make these handlers update the wrong one
+    this.rebuildParamControls(group, 'kmeans');
     group.get('algorithm')!.valueChanges.subscribe((value: string | null) => {
-      this.rebuildParamControls(index, value || '');
+      this.rebuildParamControls(group, value || '');
+    });
+    // Picking a category offers only its algorithms; the first one is preselected
+    group.get('category')!.valueChanges.subscribe((category: string | null) => {
+      const first = this.algorithmsOf(category || '')[0];
+      group.get('algorithm')!.setValue(first ? first.value : '');
     });
   }
 
@@ -298,8 +382,8 @@ export class PipelineCreationComponent implements OnInit {
   }
 
   /** Replaces a stage's params sub-form with the controls its algorithm needs. */
-  private rebuildParamControls(index: number, algorithmValue: string) {
-    const group = this.stageParams(index);
+  private rebuildParamControls(stage: FormGroup, algorithmValue: string) {
+    const group = stage.get('params') as FormGroup;
     Object.keys(group.controls).forEach(key => group.removeControl(key));
 
     const definition = this.definitionOf(algorithmValue);
@@ -307,8 +391,13 @@ export class PipelineCreationComponent implements OnInit {
       group.addControl(param.name, this.fb.control(param.default, Validators.required));
     });
 
+    // Scaling only applies to numeric features
+    if (definition?.input === 'text') {
+      stage.get('scaler')!.setValue('');
+    }
+
     // The label column only applies to supervised algorithms
-    const labelControl = this.stages.at(index).get('label')!;
+    const labelControl = stage.get('label')!;
     if (definition?.labelRequired) {
       labelControl.setValidators(Validators.required);
     } else {
@@ -412,7 +501,7 @@ export class PipelineCreationComponent implements OnInit {
       if (definition?.labelRequired) {
         entry.label = stage.label;
       }
-      if (stage.scaler) {
+      if (stage.scaler && definition?.input !== 'text') {
         entry.scaler = stage.scaler;
       }
       spec.stages.push(entry);

@@ -225,6 +225,19 @@ def add_log(job, results):
     inserted_log = col.insert_one(log)
     print(f'\nLog inserted with id={inserted_log.inserted_id}\n')
 
+# Retrieving the most recent log the executor stored for a job (returns None if there is none)
+def retrieve_latest_log(job_id):
+    col = database_connection('Logs')
+    try:
+        job_object_id = ObjectId(job_id)
+    except Exception:
+        return None
+    # The executor stores job_id as an ObjectId; newest first by insertion order
+    log = col.find_one({'job_id': job_object_id}, sort=[('_id', pymongo.DESCENDING)])
+    if log is None:
+        return None
+    return {'log': log.get('log'), 'timestamp': log.get('timestamp')}
+
 # Changing priority of given job
 def change_job_priority(job_id, new_priority):
     col = database_connection('Jobs')

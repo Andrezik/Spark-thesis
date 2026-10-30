@@ -1,0 +1,62 @@
+<h1 mat-dialog-title>Results{{results?.name ? ' - ' + results?.name : ''}}</h1>
+<div mat-dialog-content class="results-content">
+
+  <p class="summary" *ngIf="loading">Loading...</p>
+  <p class="error" *ngIf="errorMessage">{{errorMessage}}</p>
+
+  <ng-container *ngIf="results">
+    <!-- Switch between the result table and the log -->
+    <div class="switch">
+      <button mat-stroked-button [color]="view === 'result' ? 'primary' : undefined"
+              (click)="view = 'result'">Result</button>
+      <button mat-stroked-button [color]="view === 'log' ? 'primary' : undefined"
+              (click)="view = 'log'">Log</button>
+    </div>
+
+    <!-- ============================ RESULT TABLE ============================ -->
+    <ng-container *ngIf="view === 'result'">
+      <ng-container *ngIf="results.preview; else noPreview">
+        <p class="summary">
+          Showing {{results.preview.rows.length}} of {{results.preview.total_rows}} rows.
+        </p>
+        <div class="table-wrapper">
+          <table class="results-table">
+            <thead>
+              <tr><th *ngFor="let column of results.preview.columns">{{column}}</th></tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let row of results.preview.rows">
+                <td *ngFor="let value of row">{{format(value)}}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </ng-container>
+      <ng-template #noPreview>
+        <p class="summary">
+          No result table is available for this job. Only pipelines created with
+          Pipeline Creation write one, and only when they finish successfully &mdash;
+          the log may explain what happened.
+        </p>
+      </ng-template>
+    </ng-container>
+
+    <!-- ================================ LOG ================================ -->
+    <ng-container *ngIf="view === 'log'">
+      <ng-container *ngIf="results.log; else noLog">
+        <p class="summary">
+          {{showFullLog ? 'Full log, including Spark\'s own messages.' : 'Program output only (Spark\'s INFO/WARN messages hidden).'}}
+          <button mat-button color="primary" (click)="showFullLog = !showFullLog">
+            {{showFullLog ? 'Show program output only' : 'Show full log'}}
+          </button>
+          <span *ngIf="results.log_timestamp">Stored at {{results.log_timestamp}}</span>
+        </p>
+        <pre class="log">{{showFullLog ? results.log : (programOutput || '(the program printed nothing)')}}</pre>
+      </ng-container>
+      <ng-template #noLog><p class="summary">No log has been stored for this job yet.</p></ng-template>
+    </ng-container>
+  </ng-container>
+</div>
+<div mat-dialog-actions align="end">
+  <button mat-button mat-dialog-close>Close</button>
+</div>

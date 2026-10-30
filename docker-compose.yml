@@ -31,10 +31,22 @@ services:
       DB_NAME: Kubernetes
       DB_PORT: 27017
       PROXMOX: $PROXMOX
+      # Shared folder inside the container, and the same folder as the Kubernetes
+      # node sees it (Docker Desktop exposes C:\ at /run/desktop/mnt/host/c)
+      SHARED_DIR: /mnt/shared
+      SHARED_NODE_DIR: /run/desktop/mnt/host/c/Users/andre/spark-shared
+      # Docker Desktop's Kubernetes API server, as reached from the executor container
+      K8S_MASTER: k8s://https://kubernetes.docker.internal:6443
+      K8S_NODE_HOSTNAME: docker-desktop
+      SPARK_IMAGE: spark-ml:3.5.0
     volumes:
       - uploads_vol:/KubernetesAPI/backend/uploads
       # Read-only: the option definitions the API seeds into MongoDB on start-up
       - ./database:/KubernetesAPI/database:ro
+      # Shared folder for generated pipelines (programs, data, result previews).
+      # The same Windows folder is mounted into the Kubernetes pods as a hostPath
+      # volume, at the same path (/mnt/shared), so every path is valid everywhere.
+      - C:\Users\andre\spark-shared:/mnt/shared
 
   kubernetes-ui:
     build: ./frontend
@@ -48,16 +60,29 @@ services:
     build: ./executor
     container_name: executor
     restart: always
+    extra_hosts:
+      - "kubernetes.docker.internal:host-gateway"
     volumes:
       # Same mount point as in kubernetes-api, so the executable path stored
       # with a job resolves to the same file in both containers.
       - uploads_vol:/KubernetesAPI/backend/uploads
+      - C:\Users\andre\.kube\config:/root/.kube/config:ro
+      # Shared folder for generated pipelines - see kubernetes-api above
+      - C:\Users\andre\spark-shared:/mnt/shared
     environment:
       DB_URL: mongo
       DB_USERNAME: $DB_USERNAME
       DB_PASSWORD: $DB_PASSWORD
       DB_NAME: Kubernetes
       DB_PORT: 27017
+      SHARED_DIR: /mnt/shared
+
+  # Image of the driver/executor pods (apache/spark + numpy). It is only built,
+  # never started by compose:  docker compose --profile images build spark-ml
+  spark-ml:
+    image: spark-ml:3.5.0
+    build: ./spark-image
+    profiles: ["images"]
 
 volumes:
   mongo_vol:

@@ -14,6 +14,7 @@ from flask_cors import CORS
 import os
 from werkzeug.utils import secure_filename
 import uuid
+import re
 
 # Global Variables
 proxmox = os.environ['PROXMOX']  # Dockerfile Configuration
@@ -22,6 +23,23 @@ ALLOWED_EXTENSIONS = {'jar', 'py', 'json'}   # txt must be removed
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = './backend/uploads/'  # Dockerfile Configuration
 CORS(app)
+
+# Shared folder (hostPath) for generated pipelines
+# ------------------------------------------------
+# The same host folder is mounted at SHARED_DIR in the api and executor
+# containers (docker-compose bind mount) and in every driver/executor pod
+# (Kubernetes hostPath volume). Generated programs, input data and result
+# previews live there, so a path is valid everywhere without copying files.
+SHARED_DIR = os.environ.get('SHARED_DIR', '/mnt/shared')
+# The same folder as the Kubernetes node sees it. With Docker Desktop on
+# Windows, C:\Users\<user>\spark-shared is /run/desktop/mnt/host/c/Users/<user>/spark-shared
+SHARED_NODE_DIR = os.environ.get('SHARED_NODE_DIR', '/run/desktop/mnt/host/c/Users/andre/spark-shared')
+# Kubernetes API server as reached from the executor container
+K8S_MASTER = os.environ.get('K8S_MASTER', 'k8s://https://kubernetes.docker.internal:6443')
+# Node the driver pod is pinned to (the single node of Docker Desktop's cluster)
+K8S_NODE_HOSTNAME = os.environ.get('K8S_NODE_HOSTNAME', 'docker-desktop')
+# Image of the driver/executor pods: apache/spark plus numpy, which pyspark.ml needs
+SPARK_IMAGE = os.environ.get('SPARK_IMAGE', 'spark-ml:3.5.0')
 
 ''' FUNCTIONS '''
 # Check file extensions
@@ -276,59 +294,115 @@ def change_priority(job_id):
     else:
         return json.dumps({'status': 'error', 'message': 'Invalid request method'}), 400
 
-# Helper: writes a generated program to the user's upload folder and returns its path
-def save_generated_program(user, pipeline_name, source_code):
-    user_folder = os.path.join(app.config['UPLOAD_FOLDER'], user + '/')
-    if not os.path.exists(user_folder):
-        os.makedirs(user_folder)
+# Helper: decides where a new pipeline's program and result preview are stored
+#
+# Both live in the shared folder and share the same unique stem, so the result
+# preview of a job can always be found again from the job's executable path:
+#   <SHARED_DIR>/programs/<user>/<stem>.py
+#   <SHARED_DIR>/results/<stem>.json
+def pipeline_paths(user, pipeline_name):
+    safe_user = secure_filename(user) or 'user'
     safe_name = secure_filename(pipeline_name) or 'pipeline'
-    filename = secure_filename(f'{uuid.uuid4()}-{safe_name}.py')
-    # Absolute path: UPLOAD_FOLDER is relative ('./backend/uploads/') and would
-    # only resolve correctly from the API container's working directory. The
-    # executor runs from a different directory, so it needs the full path.
-    file_path = os.path.abspath(os.path.join(user_folder, filename))
-    with open(file_path, 'w', encoding='utf-8') as generated_file:
+    stem = secure_filename(f'{uuid.uuid4().hex[:12]}-{safe_name}')
+    program_path = os.path.join(SHARED_DIR, 'programs', safe_user, stem + '.py')
+    return program_path, results_path_for(program_path)
+
+
+def results_path_for(program_path):
+    """ <SHARED_DIR>/programs/<user>/<stem>.py -> <SHARED_DIR>/results/<stem>.json """
+    stem = os.path.splitext(os.path.basename(program_path))[0]
+    return os.path.join(SHARED_DIR, 'results', stem + '.json')
+
+
+# Helper: writes a generated program to the shared folder
+def save_generated_program(program_path, source_code):
+    os.makedirs(os.path.dirname(program_path), exist_ok=True)
+    with open(program_path, 'w', encoding='utf-8') as generated_file:
         generated_file.write(source_code)
-    return file_path, filename
+
+
+def driver_pod_name(program_path):
+    """
+    A fixed, unique name for the driver pod, so the executor can read its log
+    and status after spark-submit returns. Pod names must be lower-case
+    alphanumerics and '-', at most 63 characters.
+    """
+    stem = os.path.splitext(os.path.basename(program_path))[0].lower()
+    stem = re.sub(r'[^a-z0-9-]+', '-', stem).strip('-')
+    return f'{stem[:50].rstrip("-")}-driver'
 
 
 # Helper: turns the resources part of a pipeline request into the job options dict
 #
 # 'target' selects where the generated program runs:
-#   'kubernetes' (default) - submitted to the cluster, the original behaviour
+#   'kubernetes' (default) - submitted to the (local, Docker Desktop) cluster in
+#                            cluster mode: driver and executors run as pods, which
+#                            read the program and data from the shared folder
+#                            through a hostPath volume
 #   'local'                - executed by Spark inside the executor container,
-#                            which needs no cluster and is used for demonstrating
-#                            the full chain end to end
+#                            which needs no cluster
 def build_job_options(pipeline_name, program_path, resources):
     resources = resources or {}
     target = str(resources.get('target', 'kubernetes')).lower()
 
+    conf = {
+        'spark.executor.instances': int(resources.get('instances', 1)),
+        'spark.executor.cores': int(resources.get('cores', 1)),
+        'spark.executor.memory': int(resources.get('memory', 512)),
+        'spark.kubernetes.container.image': resources.get('image') or SPARK_IMAGE,
+        'spark.kubernetes.driver.node.selector.kubernetes.io/hostname': resources.get('hostname', K8S_NODE_HOSTNAME),
+        'spark.kubernetes.authenticate.driver.serviceAccountName': resources.get('serviceAccount', 'spark')
+    }
+
     if target == 'local':
-        default_master = 'local[*]'
-        default_deploy_mode = 'client'
+        master = 'local[*]'
+        deploy_mode = 'client'
+        executable = program_path
     else:
-        default_master = 'k8s://https://kubernetes.default.svc'
-        default_deploy_mode = 'cluster'
+        master = K8S_MASTER
+        deploy_mode = 'cluster'
+        # 'local://' tells Spark the file is already inside the pod (it is, through
+        # the hostPath volume below), so nothing has to be uploaded
+        executable = 'local://' + program_path
+        conf['spark.kubernetes.driver.pod.name'] = driver_pod_name(program_path)
+        # Use the locally built image, never try to pull it from a registry
+        conf['spark.kubernetes.container.image.pullPolicy'] = 'IfNotPresent'
+        # The shared folder, mounted at the same path in driver and executor pods
+        for role in ('driver', 'executor'):
+            prefix = f'spark.kubernetes.{role}.volumes.hostPath.shared'
+            conf[f'{prefix}.mount.path'] = SHARED_DIR
+            conf[f'{prefix}.options.path'] = SHARED_NODE_DIR
 
     return {
         'spark_path': resources.get('sparkPath', '/opt/spark/bin/spark-submit'),
-        'master': resources.get('master', default_master),
-        'deploy-mode': resources.get('deployMode', default_deploy_mode),
+        'master': resources.get('master', master),
+        'deploy-mode': resources.get('deployMode', deploy_mode),
         'name': pipeline_name,
         # PySpark programs are submitted without --class; the key is kept (and left
         # empty) because the option schema marks it as required.
         'class': '',
-        'conf': {
-            'spark.executor.instances': int(resources.get('instances', 1)),
-            'spark.executor.cores': int(resources.get('cores', 1)),
-            'spark.executor.memory': int(resources.get('memory', 512)),
-            'spark.kubernetes.container.image': resources.get('image', 'apache/spark:3.5.0'),
-            'spark.kubernetes.driver.node.selector.kubernetes.io/hostname': resources.get('hostname', 'k8s-1'),
-            'spark.kubernetes.authenticate.driver.serviceAccountName': resources.get('serviceAccount', 'spark')
-        },
+        'conf': conf,
         'additional_options': resources.get('additionalOptions', {}),
-        'executable': program_path
+        'executable': executable
     }
+
+
+# Helper: a wrong input path is reported before the job is queued, instead of
+# failing later on the cluster with PATH_NOT_FOUND.
+#   - Kubernetes runs: the pods only see the shared folder, so a local path must
+#     lie inside it (URIs such as s3a://... are left alone).
+#   - Any path inside the shared folder must exist (the api container sees it too).
+def missing_shared_input(spec, target=None):
+    path = ((spec or {}).get('input') or {}).get('path')
+    if not isinstance(path, str):
+        return []
+    shared_prefix = SHARED_DIR.rstrip('/') + '/'
+    is_local_path = path.startswith('/')
+    if target != 'local' and is_local_path and not path.startswith(shared_prefix):
+        return [f'input.path: {path!r} is outside the shared folder - Kubernetes pods can only read files under {shared_prefix}']
+    if path.startswith(shared_prefix) and not os.path.exists(path):
+        return [f'input.path: {path!r} does not exist in the shared folder']
+    return []
 
 
 # Route for previewing the program a specification would generate (nothing is stored)
@@ -339,11 +413,11 @@ def preview_program():
         return json.dumps({'status': 'error', 'message': 'Invalid request body'}), 400
 
     spec = (request.json or {}).get('spec')
-    errors = spg.validate_spec(spec)
+    errors = spg.validate_spec(spec) or missing_shared_input(spec)
     if errors:
         return json.dumps({'status': 'error', 'message': 'Invalid pipeline specification', 'errors': errors}), 400
 
-    source_code = spg.generate_program(spec, skip_validation=True)
+    source_code = spg.generate_program(spec, skip_validation=True, preview=True)
     return json.dumps({'status': 'success', 'program': source_code}), 200
 
 
@@ -362,17 +436,23 @@ def pipeline():
         return json.dumps({'status': 'error', 'message': 'No user found'}), 400
 
     # 1. Validate the specification before anything is written to disk or to the database
-    errors = spg.validate_spec(spec)
+    target = str((payload.get('resources') or {}).get('target', 'kubernetes')).lower()
+    errors = spg.validate_spec(spec) or missing_shared_input(spec, target)
     if errors:
         return json.dumps({'status': 'error', 'message': 'Invalid pipeline specification', 'errors': errors}), 400
 
-    # 2. Generate the PySpark program from the specification
-    source_code = spg.generate_program(spec, skip_validation=True)
+    # 2. Generate the PySpark program from the specification. It also prints a
+    #    preview of its result, which the executor stores in the shared folder
+    #    for the UI's "Results" button.
     pipeline_name = spec.get('name') or 'pipeline'
+    program_path = pipeline_paths(username, pipeline_name)[0]
+    source_code = spg.generate_program(spec, skip_validation=True, preview=True)
+    filename = os.path.basename(program_path)
 
-    # 3. Store the generated program so the executor can submit it
+    # 3. Store the generated program in the shared folder, where the executor
+    #    (local runs) and the driver pod (Kubernetes runs) can both read it
     try:
-        program_path, filename = save_generated_program(username, pipeline_name, source_code)
+        save_generated_program(program_path, source_code)
     except OSError as error:
         return json.dumps({'status': 'error', 'message': f'Could not store generated program: {error}'}), 500
 
@@ -387,6 +467,43 @@ def pipeline():
         'filename': filename,
         'file_path': program_path,
         'program': source_code
+    }), 200
+
+
+# Route for the results of a job: the preview the executor stored in the shared
+# folder (pipelines only) and the log the executor stored after running it
+@app.route('/job-results/<job_id>', methods=['GET'])
+@authentication_required
+def job_results(job_id):
+    try:
+        job = dc.retrieve_job(job_id)
+    except Exception:
+        job = None
+    if job is None:
+        return json.dumps({'status': 'error', 'message': f'No job with id={job_id} found'}), 404
+
+    executable = job['options'].get('executable', '')
+    program_path = executable[len('local://'):] if executable.startswith('local://') else executable
+
+    preview = None
+    results_path = os.path.abspath(results_path_for(program_path))
+    results_dir = os.path.join(os.path.abspath(SHARED_DIR), 'results') + os.sep
+    # Only files inside the shared results folder are ever read
+    if results_path.startswith(results_dir) and os.path.isfile(results_path):
+        try:
+            with open(results_path, encoding='utf-8') as results_file:
+                preview = json.load(results_file)
+        except (OSError, ValueError) as error:
+            print(f'Could not read results {results_path}: {error}')
+
+    log = dc.retrieve_latest_log(job_id)
+    return json.dumps({
+        'status': 'success',
+        'job_status': job.get('status'),
+        'name': job['options'].get('name'),
+        'preview': preview,
+        'log': log['log'] if log else None,
+        'log_timestamp': log['timestamp'] if log else None
     }), 200
 
 
