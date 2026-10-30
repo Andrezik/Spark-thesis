@@ -5,3 +5,16 @@ __pycache__/
 *.pyc
 # Scratch file produced when copying a generated program out of the API container
 /gen.py
+# Angular build cache
+.angular/
+
+# Local scratch / outputs
+/result.txt
+/kubectl
+/Claude outputs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
